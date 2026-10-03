@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
-"""SVG graph of the relationships between your open pull requests.
+"""SVG graph of the planned dependencies between your open pull requests.
 
-pr_manager.py writes it on every 'Plan all' (D), from the dependencies
-analyze_pr.py already found for each PR, so nothing is fetched here:
+pr_manager.py writes it on every 'Plan all' (D). It shows exactly the
+dependencies the plan writes down - in JIRA links and in the 'Depends on' /
+'Required by' block of your PR descriptions (fix_dependencies.solid_lists):
+open ones judged CONFIRMED, CI-FIX or DISCOVERED. Weaker or refuted ones, and
+PRs that merely share files, are left out.
 
-* an arrow goes from the PR to merge first to the PR that waits on it, drawn
-  in the colour of its verdict (CONFIRMED, CI-FIX, LIKELY, ...); one arrow per
-  pair, with the strongest verdict when both sides report it;
-* a dotted grey line joins two PRs that share files and nothing more;
-* an open PR or JIRA of somebody else that one of yours needs is a dashed box;
-* PRs with no relationship at all are listed apart, below the graph.
+* an arrow goes from the PR to merge first to the PR that waits on it, in the
+  colour of its verdict; one arrow per pair, with the strongest verdict when
+  both sides report it, and a head at both ends when each needs the other;
+* an open PR of somebody else, or a JIRA issue with no PR, that one of yours
+  needs is a dashed box;
+* PRs with no planned dependency are listed apart, below the graph.
 
-Prerequisites sit on the left, so the columns read as a merge order. Hovering
-an arrow shows why the dependency was found; a box links to its PR.
+Prerequisites sit on the left, so the columns read as a merge order; an arrow
+that skips columns runs between the boxes, never behind one. Hovering an
+arrow shows why the dependency was found; a box links to its PR.
 
 Pure Python, no Graphviz needed.
 """
@@ -26,20 +30,14 @@ from xml.sax.saxutils import escape, quoteattr
 
 DEFAULT_GRAPH_FILE = "pr-graph.svg"
 
-# Colour and dash pattern of each verdict of analyze_pr.py, strongest first:
-# when both PRs report the same pair, the stronger verdict wins.
-VERDICT_STYLE = {
-    "CONFIRMED": ("#1f6feb", ""),
-    "CI-FIX": ("#d97706", ""),
-    "DISCOVERED": ("#7c3aed", ""),
-    "LIKELY": ("#0891b2", ""),
-    "UNVERIFIED": ("#6b7280", "6 4"),
-    "WEAK": ("#9ca3af", "6 4"),
-    "UNSUPPORTED": ("#dc2626", "2 4"),
-    "STALE": ("#dc2626", "2 4"),
-}
-VERDICT_RANK = {verdict: rank for rank, verdict in enumerate(VERDICT_STYLE)}
-OVERLAP_STYLE = ("#9ca3af", "1 3")
+# Colour of each verdict the plan writes down, strongest first: when both PRs
+# report the same pair, the stronger verdict wins. Any other is drawn grey.
+VERDICT_COLOUR = {"CONFIRMED": "#1f6feb", "CI-FIX": "#d97706", "DISCOVERED": "#7c3aed"}
+OTHER_COLOUR = "#6b7280"
+
+
+def _rank(verdict: str) -> int:
+    return list(VERDICT_COLOUR).index(verdict) if verdict in VERDICT_COLOUR else len(VERDICT_COLOUR)
 STATUS_FILL = {  # the statuses of list_upstream_prs.py
     "READY TO MERGE": "#bbf7d0",
     "WAITING FOR REVIEW": "#dcfce7",
@@ -53,6 +51,7 @@ STATUS_FILL = {  # the statuses of list_upstream_prs.py
 
 NODE_W, NODE_H = 260, 62
 COL_GAP, GAP, GROUP_GAP = 120, 24, 48     # between columns, boxes, groups
+LANE_H = 14                               # the slot of an arrow crossing a column
 MARGIN, TOP = 24, 94                      # TOP: room for the heading and the legend
 TITLE_CHARS = 40
 
@@ -72,13 +71,13 @@ class Edge:
     target: str             # ... then this one
     verdict: str
     reasons: list[str] = field(default_factory=list)
+    mutual: bool = False    # each needs the other: merge them back to back
 
 
 @dataclass
 class Graph:
-    nodes: dict[str, Node]                  # by '#8704', or by JIRA key when there is no PR
+    nodes: dict[str, Node]  # by '#8704', or by JIRA key when there is no PR
     edges: list[Edge]
-    overlaps: list[tuple[str, str, str]]    # (a, b, what they share)
 
 
 # --------------------------------------------------------------------------- #
@@ -91,35 +90,32 @@ def _node(ref: str, jira: str, title: str, status: str, url: str, mine: bool) ->
     return Node(label, title, status, url, mine)
 
 
-def build_graph(prs: Iterable[dict[str, Any]], deps_by_number: dict[int, dict[str, Any]]) -> Graph:
+def build_graph(prs: Iterable[dict[str, Any]],
+                planned: dict[int, tuple[list[dict[str, Any]], list[dict[str, Any]]]]) -> Graph:
     """The graph of your open PRs.
 
     ``prs`` has one dict per open PR: number, title, status, url and jira (may
-    be empty). ``deps_by_number`` maps a PR number to what
-    analyze_pr.collect_dependencies returned for it; a PR missing from it was
-    not analysed, and says so in its box.
+    be empty). ``planned`` maps a PR number to the dependencies the plan writes
+    for it, as fix_dependencies.solid_lists returns them: what it needs, and
+    what waits on it. A PR missing from it was not analysed, and says so.
     """
     nodes: dict[str, Node] = {}
     for pr in prs:
         ref = f"#{pr['number']}"
         nodes[ref] = _node(ref, pr.get("jira") or "", pr.get("title") or "",
                            pr.get("status") or "", pr.get("url") or "", mine=True)
-        if pr["number"] not in deps_by_number:
+        if pr["number"] not in planned:
             nodes[ref].title = "(not analysed) " + nodes[ref].title
     mine = set(nodes)
     edges: dict[tuple[str, str], Edge] = {}
 
-    def node_for(entry: dict[str, Any]) -> str | None:
-        """The node of a dependency, added when it is not yours; None when merged."""
-        ref = entry.get("ref") or ""
-        if ref in mine:
-            return ref
-        if not ref or not entry.get("open"):
-            return None
-        if ref not in nodes:
+    def node_for(entry: dict[str, Any]) -> str:
+        """The node of a dependency, added when it is not yours."""
+        ref = entry.get("ref") or entry.get("jira") or ""
+        if ref and ref not in nodes:
             if ref.startswith("#"):
                 status = (f"by {entry.get('author') or 'unknown'}, "
-                          f"{(entry.get('state') or 'unknown').lower()}")
+                          f"{(entry.get('state') or 'open').lower()}")
             else:
                 status = "JIRA, no pull request"
             nodes[ref] = _node(ref, entry.get("jira") or "", entry.get("title") or "", status,
@@ -127,42 +123,31 @@ def build_graph(prs: Iterable[dict[str, Any]], deps_by_number: dict[int, dict[st
         return ref
 
     def add_edge(source: str, target: str, entry: dict[str, Any]) -> None:
-        verdict = entry.get("verdict")
-        verdict = verdict if verdict in VERDICT_RANK else "UNVERIFIED"
+        verdict = entry.get("verdict") or ""
         reasons = [str(r) for r in entry.get("reasons") or []]
         if entry.get("verdict_reason"):
             reasons.append(f"{verdict}: {entry['verdict_reason']}")
-        edge = edges.setdefault((source, target), Edge(source, target, verdict))
-        if VERDICT_RANK[verdict] < VERDICT_RANK[edge.verdict]:
+        reverse = edges.get((target, source))
+        edge = reverse or edges.setdefault((source, target), Edge(source, target, verdict))
+        if reverse:
+            edge.mutual = True
+        if _rank(verdict) < _rank(edge.verdict):
             edge.verdict = verdict
         edge.reasons += [r for r in reasons if r not in edge.reasons]
 
-    for number, deps in deps_by_number.items():
+    for number, (depends, required) in planned.items():
         me = f"#{number}"
         if me not in mine:
             continue
-        for key, waits in (("depends_on", True), ("blocks", False)):
-            for entry in deps.get(key, []):
-                other = node_for(entry)
-                if other and other != me:
-                    add_edge(*((other, me) if waits else (me, other)), entry)
-
-    overlaps: dict[frozenset[str], tuple[str, str, str]] = {}
-    for number, deps in deps_by_number.items():
-        me = f"#{number}"
-        for overlap in deps.get("overlaps", []):
-            other = overlap.get("ref") or ""
-            pair = frozenset((me, other))
-            if len(pair) < 2 or not pair <= mine or pair in overlaps \
-                    or (me, other) in edges or (other, me) in edges:
-                continue
-            what = f"{overlap.get('count', 0)} file(s) in common"
-            if overlap.get("clashes"):
-                what += f", {len(overlap['clashes'])} line clash(es)"
-            if overlap.get("files"):
-                what += ": " + ", ".join(overlap["files"])
-            overlaps[pair] = (me, other, what)
-    return Graph(nodes, list(edges.values()), list(overlaps.values()))
+        for entry in depends:
+            other = node_for(entry)
+            if other and other != me:
+                add_edge(other, me, entry)
+        for entry in required:
+            other = node_for(entry)
+            if other and other != me:
+                add_edge(me, other, entry)
+    return Graph(nodes, list(edges.values()))
 
 
 # --------------------------------------------------------------------------- #
@@ -171,10 +156,9 @@ def build_graph(prs: Iterable[dict[str, Any]], deps_by_number: dict[int, dict[st
 def _groups(graph: Graph) -> tuple[list[list[str]], list[str]]:
     """The connected groups of nodes, largest first, and the nodes on their own."""
     neighbours: dict[str, set[str]] = {n: set() for n in graph.nodes}
-    for a, b in [(e.source, e.target) for e in graph.edges] + \
-                [(a, b) for a, b, _ in graph.overlaps]:
-        neighbours[a].add(b)
-        neighbours[b].add(a)
+    for e in graph.edges:
+        neighbours[e.source].add(e.target)
+        neighbours[e.target].add(e.source)
     seen: set[str] = set()
     groups: list[list[str]] = []
     for start in graph.nodes:
@@ -193,30 +177,34 @@ def _groups(graph: Graph) -> tuple[list[list[str]], list[str]]:
     return groups, alone
 
 
-def _columns(group: list[str], edges: list[Edge]) -> list[list[str]]:
+# A slot in a column: a node, or the lane of edge k crossing column i.
+Slot = str | tuple[int, int]
+
+
+def _columns(group: list[str], edges: list[Edge]) -> list[list[Slot]]:
     """Each node one column right of its rightmost prerequisite (an edge that
-    closes a cycle is ignored), then ordered within the columns to keep arrows
-    short."""
+    closes a cycle is ignored); an edge that skips columns gets a lane in each
+    column it crosses; then the slots are ordered to keep arrows short."""
     members = set(group)
-    succ: dict[str, list[str]] = {n: [] for n in group}
-    for e in edges:
+    succ: dict[str, list[int]] = {n: [] for n in group}
+    for k, e in enumerate(edges):
         if e.source in members and e.target in members:
-            succ[e.source].append(e.target)
+            succ[e.source].append(k)
 
     # Depth first: dropping the edges back to a node still on the stack leaves
     # a DAG, and the order nodes finish in is a reversed topological order.
-    after: dict[str, list[str]] = {n: [] for n in group}
+    forward: list[int] = []
     finished: list[str] = []
     on_stack: set[str] = set()
 
     def visit(node: str) -> None:
         on_stack.add(node)
-        for nxt in succ[node]:
-            if nxt in on_stack:
+        for k in succ[node]:
+            if edges[k].target in on_stack:
                 continue
-            after[node].append(nxt)
-            if nxt not in finished:
-                visit(nxt)
+            forward.append(k)
+            if edges[k].target not in finished:
+                visit(edges[k].target)
         on_stack.discard(node)
         finished.append(node)
 
@@ -225,19 +213,31 @@ def _columns(group: list[str], edges: list[Edge]) -> list[list[str]]:
             visit(node)
 
     level = dict.fromkeys(group, 0)
-    before: dict[str, list[str]] = {n: [] for n in group}
-    for node in reversed(finished):
-        for nxt in after[node]:
-            level[nxt] = max(level[nxt], level[node] + 1)
-            before[nxt].append(node)
-    columns: list[list[str]] = [[] for _ in range(max(level.values()) + 1)]
+    position = {n: i for i, n in enumerate(reversed(finished))}
+    for k in sorted(forward, key=lambda k: position[edges[k].source]):
+        e = edges[k]
+        level[e.target] = max(level[e.target], level[e.source] + 1)
+
+    columns: list[list[Slot]] = [[] for _ in range(max(level.values()) + 1)]
     for node in sorted(group):
         columns[level[node]].append(node)
+    before: dict[Slot, list[Slot]] = {}
+    after: dict[Slot, list[Slot]] = {}
+    for k in forward:
+        e = edges[k]
+        chain: list[Slot] = [e.source]
+        for i in range(level[e.source] + 1, level[e.target]):
+            columns[i].append((k, i))
+            chain.append((k, i))
+        chain.append(e.target)
+        for a, b in zip(chain, chain[1:]):
+            after.setdefault(a, []).append(b)
+            before.setdefault(b, []).append(a)
 
-    def by_barycentre(column: list[str], fixed: list[str], links: dict[str, list[str]]) -> None:
-        pos = {n: i for i, n in enumerate(fixed)}
-        def key(node: str) -> float:
-            linked = [pos[n] for n in links[node] if n in pos]
+    def by_barycentre(column: list[Slot], fixed: list[Slot], links: dict[Slot, list[Slot]]) -> None:
+        pos = {s: i for i, s in enumerate(fixed)}
+        def key(slot: Slot) -> float:
+            linked = [pos[s] for s in links.get(slot, []) if s in pos]
             return sum(linked) / len(linked) if linked else len(fixed)
         column.sort(key=key)
 
@@ -249,47 +249,57 @@ def _columns(group: list[str], edges: list[Edge]) -> list[list[str]]:
     return columns
 
 
-def _layout(graph: Graph) -> tuple[dict[str, tuple[float, float]], float, float | None, float]:
-    """Top-left corner of every box, the width of the graph, the top of the
-    'no relationship' grid (None without one) and the bottom of it all."""
+@dataclass
+class Layout:
+    boxes: dict[str, tuple[float, float]]                 # top-left corner of each box
+    lanes: dict[int, list[tuple[float, float]]]           # (x, y) where edge k crosses
+    width: float
+    alone_top: float | None                               # top of the 'no dependency' grid
+    bottom: float
+
+
+def _height(slot: Slot) -> float:
+    return NODE_H if isinstance(slot, str) else LANE_H
+
+
+def _layout(graph: Graph) -> Layout:
     groups, alone = _groups(graph)
-    boxes: dict[str, tuple[float, float]] = {}
-    y, width = float(TOP), 0.0
+    out = Layout({}, {}, 0.0, None, float(TOP))
+    y = float(TOP)
     for group in groups:
         columns = _columns(group, graph.edges)
-        height = max(map(len, columns)) * (NODE_H + GAP) - GAP
+        extent = [sum(_height(s) + GAP for s in c) - GAP for c in columns]
         for i, column in enumerate(columns):
-            top = y + (height - (len(column) * (NODE_H + GAP) - GAP)) / 2
-            for j, node in enumerate(column):
-                boxes[node] = (MARGIN + i * (NODE_W + COL_GAP), top + j * (NODE_H + GAP))
-        width = max(width, len(columns) * (NODE_W + COL_GAP) - COL_GAP)
-        y += height + GROUP_GAP
-    alone_top = None
+            x = MARGIN + i * (NODE_W + COL_GAP)
+            top = y + (max(extent) - extent[i]) / 2
+            for slot in column:
+                if isinstance(slot, str):
+                    out.boxes[slot] = (x, top)
+                else:
+                    out.lanes.setdefault(slot[0], []).append((x, top + LANE_H / 2))
+                top += _height(slot) + GAP
+        out.width = max(out.width, len(columns) * (NODE_W + COL_GAP) - COL_GAP)
+        y += max(extent) + GROUP_GAP
     if alone:
-        per_row = max(3, int((width + GAP) // (NODE_W + GAP)))
-        alone_top = y + 22 if groups else y
+        per_row = max(3, int((out.width + GAP) // (NODE_W + GAP)))
+        out.alone_top = y + 22 if groups else y
         for k, node in enumerate(sorted(alone)):
-            boxes[node] = (MARGIN + k % per_row * (NODE_W + GAP),
-                           alone_top + k // per_row * (NODE_H + GAP))
-        width = max(width, min(len(alone), per_row) * (NODE_W + GAP) - GAP)
-        y = alone_top + ((len(alone) - 1) // per_row + 1) * (NODE_H + GAP)
-    return boxes, width, alone_top, y
+            out.boxes[node] = (MARGIN + k % per_row * (NODE_W + GAP),
+                               out.alone_top + k // per_row * (NODE_H + GAP))
+        out.width = max(out.width, min(len(alone), per_row) * (NODE_W + GAP) - GAP)
+        y = out.alone_top + ((len(alone) - 1) // per_row + 1) * (NODE_H + GAP)
+    out.bottom = y
+    return out
 
 
 # --------------------------------------------------------------------------- #
 # Rendering
 # --------------------------------------------------------------------------- #
-def _stroke(style: tuple[str, str], width: float) -> str:
-    colour, dash = style
-    return (f'fill="none" stroke="{colour}" stroke-width="{width}"'
-            + (f' stroke-dasharray="{dash}"' if dash else ""))
-
-
 def _curve(x1: float, y1: float, x2: float, y2: float) -> str:
-    """From the right side of one box to the left side of another; backwards
-    (only in a cycle) it swings out and back in."""
+    """A curve to (x2, y2), from (x1, y1) the path is at; backwards (only in a
+    cycle) it swings out and back in."""
     bend = max(40.0, (x2 - x1) / 2) if x2 > x1 else 80.0
-    return f"M{x1:.0f},{y1:.1f} C{x1 + bend:.0f},{y1:.1f} {x2 - bend:.0f},{y2:.1f} {x2:.0f},{y2:.1f}"
+    return f" C{x1 + bend:.0f},{y1:.1f} {x2 - bend:.0f},{y2:.1f} {x2:.0f},{y2:.1f}"
 
 
 def _box(node: Node, x: float, y: float) -> str:
@@ -305,31 +315,40 @@ def _box(node: Node, x: float, y: float) -> str:
     return f'<a href={quoteattr(node.url)} target="_blank">{body}</a>' if node.url else body
 
 
-def _ports(graph: Graph, boxes: dict[str, tuple[float, float]]) -> tuple[list[float], list[float]]:
+def _ports(graph: Graph, layout: Layout) -> tuple[list[float], list[float]]:
     """Where each edge leaves its source and enters its target: spread along
-    the side of the box, in the order of the boxes at the other end."""
+    the side of the box, in the order of where the edge heads next."""
+    def next_y(k: int, leaving: bool) -> float:
+        e, lanes = graph.edges[k], layout.lanes.get(k)
+        if lanes:
+            return lanes[0 if leaving else -1][1]
+        return layout.boxes[e.target if leaving else e.source][1] + NODE_H / 2
+
     out_y, in_y = [0.0] * len(graph.edges), [0.0] * len(graph.edges)
-    for port, own, other in ((out_y, "source", "target"), (in_y, "target", "source")):
+    for port, own, leaving in ((out_y, "source", True), (in_y, "target", False)):
         by_node: dict[str, list[int]] = {}
         for k, e in enumerate(graph.edges):
             by_node.setdefault(getattr(e, own), []).append(k)
         for node, ks in by_node.items():
-            ks.sort(key=lambda k: boxes[getattr(graph.edges[k], other)][1])
+            ks.sort(key=lambda k: next_y(k, leaving))
             for slot, k in enumerate(ks, 1):
-                port[k] = boxes[node][1] + NODE_H * slot / (len(ks) + 1)
+                port[k] = layout.boxes[node][1] + NODE_H * slot / (len(ks) + 1)
     return out_y, in_y
 
 
 def render_svg(graph: Graph, heading: str = "Open pull requests", generated: str = "") -> str:
-    boxes, width, alone_top, bottom = _layout(graph)
+    layout = _layout(graph)
+    boxes = layout.boxes
 
-    # The legend shows only what is drawn.
-    legend = [(v, VERDICT_STYLE[v]) for v in VERDICT_STYLE if any(e.verdict == v for e in graph.edges)]
-    if graph.overlaps:
-        legend.append(("shares files", OVERLAP_STYLE))
+    # The legend and the arrow heads: only what is drawn.
+    verdicts = sorted({e.verdict for e in graph.edges}, key=_rank)
+    colours = {v: VERDICT_COLOUR.get(v, OTHER_COLOUR) for v in verdicts}
+    legend = list(colours.items())
+    if any(e.mutual for e in graph.edges):
+        legend.append(("<-> each needs the other", "#111827"))
     legend_w = sum(44 + 7 * len(name) for name, _ in legend)
-    total_w = max(width, legend_w, 760) + 2 * MARGIN
-    total_h = bottom + MARGIN
+    total_w = max(layout.width, legend_w, 760) + 2 * MARGIN
+    total_h = layout.bottom + MARGIN
 
     out = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{total_w:.0f}" height="{total_h:.0f}" '
@@ -339,43 +358,43 @@ def render_svg(graph: Graph, heading: str = "Open pull requests", generated: str
         ".head{font-size:16px;font-weight:bold;fill:#111827}</style>",
         '<rect width="100%" height="100%" fill="#ffffff"/>',
         "<defs>",
-        *(f'<marker id="arrow-{v}" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="8" '
-          f'markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="{colour}"/></marker>'
-          for v, (colour, _) in VERDICT_STYLE.items()),
+        *(f'<marker id="arrow-{i}" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="8" '
+          f'markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" '
+          f'fill="{colours[v]}"/></marker>' for i, v in enumerate(verdicts)),
         "</defs>",
     ]
     summary = (f"{sum(n.mine for n in graph.nodes.values())} open PR(s), "
-               f"{len(graph.edges)} dependency(ies), {len(graph.overlaps)} file overlap(s)"
+               f"{len(graph.edges)} planned dependency(ies)"
                + (f" - generated {generated}" if generated else "")
                + ". Arrows point from the PR to merge first.")
     out.append(f'<text x="{MARGIN}" y="{MARGIN + 6}" class="head">{escape(heading)}</text>'
                f'<text x="{MARGIN}" y="{MARGIN + 24}" class="small">{escape(summary)}</text>')
     x = MARGIN
-    for name, style in legend:
-        out.append(f'<path d="M{x},{MARGIN + 44} h22" {_stroke(style, 2.5)}/>'
-                   f'<text x="{x + 27}" y="{MARGIN + 48}" class="small">{name}</text>')
+    for name, colour in legend:
+        out.append(f'<path d="M{x},{MARGIN + 44} h22" stroke="{colour}" stroke-width="2.5"/>'
+                   f'<text x="{x + 27}" y="{MARGIN + 48}" class="small">{escape(name)}</text>')
         x += 44 + 7 * len(name)
-    if alone_top is not None and alone_top > TOP:
-        out.append(f'<text x="{MARGIN}" y="{alone_top - 8:.0f}" class="small">'
-                   f'No relationship found:</text>')
+    if layout.alone_top is not None and graph.edges:
+        out.append(f'<text x="{MARGIN}" y="{layout.alone_top - 8:.0f}" class="small">'
+                   f'No planned dependency:</text>')
 
-    for a, b, what in graph.overlaps:
-        (ax, ay), (bx, by) = sorted((boxes[a], boxes[b]))
-        ay, by = ay + NODE_H / 2, by + NODE_H / 2
-        if ax == bx:   # same column: a bracket on the right side
-            right = ax + NODE_W
-            d = f"M{right:.0f},{ay:.1f} C{right + 60:.0f},{ay:.1f} {right + 60:.0f},{by:.1f} {right:.0f},{by:.1f}"
-        else:
-            d = _curve(ax + NODE_W, ay, bx, by)
-        out.append(f'<path d="{d}" {_stroke(OVERLAP_STYLE, 2)}>'
-                   f'<title>{escape(a)} and {escape(b)}: {escape(what)}</title></path>')
-    out_y, in_y = _ports(graph, boxes)
-    for k in sorted(range(len(graph.edges)), key=lambda k: -VERDICT_RANK[graph.edges[k].verdict]):
+    out_y, in_y = _ports(graph, layout)
+    marker = {v: i for i, v in enumerate(verdicts)}
+    for k in sorted(range(len(graph.edges)), key=lambda k: -_rank(graph.edges[k].verdict)):
         e = graph.edges[k]   # the strongest drawn last, on top
-        why = "\n".join([f"{e.source} before {e.target} - {e.verdict}"] + e.reasons)
-        d = _curve(boxes[e.source][0] + NODE_W, out_y[k], boxes[e.target][0], in_y[k])
-        out.append(f'<path d="{d}" {_stroke(VERDICT_STYLE[e.verdict], 2.2)} '
-                   f'marker-end="url(#arrow-{e.verdict})"><title>{escape(why)}</title></path>')
+        x, y = boxes[e.source][0] + NODE_W, out_y[k]
+        d = f"M{x:.0f},{y:.1f}"
+        for lane_x, lane_y in layout.lanes.get(k, []):
+            d += _curve(x, y, lane_x, lane_y) + f" H{lane_x + NODE_W:.0f}"
+            x, y = lane_x + NODE_W, lane_y
+        d += _curve(x, y, boxes[e.target][0], in_y[k])
+        what = "each needs the other: merge them back to back" if e.mutual \
+            else f"{e.source} before {e.target}"
+        why = "\n".join([f"{e.source} - {e.target}: {what} - {e.verdict}"] + e.reasons)
+        start = f' marker-start="url(#arrow-{marker[e.verdict]})"' if e.mutual else ""
+        out.append(f'<path d="{d}" fill="none" stroke="{colours[e.verdict]}" stroke-width="2.2"'
+                   f'{start} marker-end="url(#arrow-{marker[e.verdict]})">'
+                   f'<title>{escape(why)}</title></path>')
     out += [_box(node, *boxes[ref]) for ref, node in graph.nodes.items()]
     out.append("</svg>")
     return "\n".join(out) + "\n"

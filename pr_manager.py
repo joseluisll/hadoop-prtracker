@@ -10,8 +10,8 @@ One screen drives what the command-line scripts do separately:
 * Dependencies - the JIRA links (one per pair) and the 'Depends on' /
   'Required by' lists of your PR descriptions (both sides when both PRs are
   yours) the evidence asks for, for one PR or all of them, applied one change
-  at a time (fix_dependencies.py); 'Plan all' also draws how your open PRs
-  relate to each other in pr-graph.svg, in the working directory (pr_graph.py);
+  at a time (fix_dependencies.py); 'Plan all' also draws those dependencies
+  in pr-graph.svg, in the working directory (pr_graph.py);
 * Branches     - the stale branches of the fork (list_stale_branches.py),
   report only.
 
@@ -525,19 +525,20 @@ class PRManager(App):
         self.call_from_thread(self.fill_plan, items, notes, targets, graph)
 
     def write_graph(self, bundles: list[Bundle]) -> str:
-        """Draw the open PRs and the dependencies just found; returns a note."""
+        """Draw the open PRs and the dependencies the plan writes; returns a note."""
         s = self.settings
         prs = [{"number": r.number, "title": r.title, "status": r.status, "url": r.url,
                 "jira": jira_key_in(r.title)} for r in self.rows]
         try:  # a bug here must not take the plan down with it
-            graph = pr_graph.build_graph(prs, {b.pr["number"]: b.deps for b in bundles})
+            planned = {b.pr["number"]: fd.solid_lists(fd.Target(b.pr, b.jira, b.deps))[:2]
+                       for b in bundles}
+            graph = pr_graph.build_graph(prs, planned)
             svg = pr_graph.render_svg(graph, f"Open PRs of {s.author} into {s.repo}:{s.base}",
                                       datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %Z"))
             path = pr_graph.write_svg(pr_graph.DEFAULT_GRAPH_FILE, svg)
         except Exception as exc:
             return f"graph not written: {exc}"
-        return (f"graph written to {path}: {len(graph.edges)} dependency(ies), "
-                f"{len(graph.overlaps)} overlap(s)")
+        return f"graph written to {path}: {len(graph.edges)} planned dependency(ies)"
 
     def fill_plan(self, items: list[PlanItem], notes: list[str], targets: list[str],
                   graph: bool) -> None:

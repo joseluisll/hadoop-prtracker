@@ -12,7 +12,7 @@ change is shown and confirmed one by one.
 | Script | What it does |
 | --- | --- |
 | `pr_manager.py` | Textual terminal UI over all the scripts below: PR list, analysis, dependency plan, fork branches. |
-| `pr_graph.py` | Draws how your open PRs relate (dependencies by verdict, shared files, others' PRs you need) as `pr-graph.svg` in the working directory. `pr_manager.py` rewrites it on every *Plan all* (`D`). |
+| `pr_graph.py` | Draws the dependencies *Plan all* writes down (CONFIRMED, CI-FIX, DISCOVERED), between your open PRs and others' PRs or JIRAs they need, as `pr-graph.svg` in the working directory. `pr_manager.py` rewrites it on every *Plan all* (`D`). |
 | `list_upstream_prs.py` | Lists your open PRs into `apache/hadoop:trunk` and why each one is not merged. |
 | `analyze_pr.py` | Full report for one PR or JIRA id: CI (GitHub Actions and Yetus), reviews, JIRA state, dependencies with a verdict each. |
 | `fix_dependencies.py` | Writes the dependencies `analyze_pr.py` finds as JIRA "Blocker" links and as a managed block in the PR description. Proposes removing UNSUPPORTED and STALE ones. |
