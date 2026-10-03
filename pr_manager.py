@@ -10,7 +10,8 @@ One screen drives what the command-line scripts do separately:
 * Dependencies - the JIRA links (one per pair) and the 'Depends on' /
   'Required by' lists of your PR descriptions (both sides when both PRs are
   yours) the evidence asks for, for one PR or all of them, applied one change
-  at a time (fix_dependencies.py);
+  at a time (fix_dependencies.py); 'Plan all' also draws how your open PRs
+  relate to each other in pr-graph.svg, in the working directory (pr_graph.py);
 * Branches     - the stale branches of the fork (list_stale_branches.py),
   report only.
 
@@ -34,6 +35,7 @@ import os
 import subprocess
 import sys
 import webbrowser
+from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -43,6 +45,7 @@ try:
     import analyze_pr as core
     import fix_dependencies as fd
     import list_upstream_prs as lup
+    import pr_graph
 except ImportError as exc:  # pragma: no cover - misplaced file
     raise SystemExit(f"pr_manager.py must sit next to the other PR scripts ({exc}).")
 
@@ -516,7 +519,26 @@ class PRManager(App):
                 # A description of another PR: that is the one to fetch again.
                 touched = change.target[1:] if change.target.startswith("#") else ""
                 items.append(PlanItem(change, int(touched) if touched.isdigit() else number))
+        if len(targets) > 1:
+            notes.insert(0, self.write_graph(bundles))
         self.call_from_thread(self.fill_plan, items, notes, targets)
+
+    def write_graph(self, bundles: list[Bundle]) -> str:
+        """Draw the open PRs and the dependencies just found; returns a note."""
+        s = self.settings
+        prs = [{"number": r.number, "title": r.title, "status": r.status, "url": r.url,
+                "jira": jira_key_in(r.title)} for r in self.rows]
+        deps = {b.pr["number"]: b.deps for b in bundles if b.deps is not None}
+        try:
+            graph = pr_graph.build_graph(prs, deps)
+            svg = pr_graph.render_svg(
+                graph, f"Open PRs of {s.author} into {s.repo}:{s.base}",
+                datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %Z"))
+            path = pr_graph.write_svg(pr_graph.DEFAULT_GRAPH_FILE, svg)
+        except Exception as exc:
+            return f"graph not written: {exc}"
+        return (f"graph written to {path}: {len(graph.edges)} dependency(ies), "
+                f"{len(graph.overlaps)} overlap(s)")
 
     def fill_plan(self, items: list[PlanItem], notes: list[str], targets: list[str]) -> None:
         self.plan, self.plan_notes, self.plan_scope = items, notes, targets

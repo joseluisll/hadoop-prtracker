@@ -46,5 +46,6 @@ jobs:
       - name: Offline smoke tests
         run: |
           python tests/plan_smoke.py
+          python tests/graph_smoke.py
           python tests/qbt_smoke.py
           python tests/review_smoke.py
