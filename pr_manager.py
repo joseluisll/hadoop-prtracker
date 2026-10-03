@@ -629,14 +629,18 @@ class PRManager(App):
     # ----- branches --------------------------------------------------------- #
     @work(thread=True, exclusive=True, group="branches")
     def load_branches(self, fetch: bool) -> None:
+        # Without a Hadoop clone list_stale_branches.py would run in this repository instead.
+        if not self.settings.repo_path:
+            self.fail_from_thread("branches", "listing the branches", RuntimeError(
+                f"no Hadoop clone at {core.DEFAULT_REPO_PATH}; "
+                "pass --repo-path or set HADOOP_REPO_PATH"))
+            return
         self.status_from_thread("branches", "fetching and comparing branches ..." if fetch
                                 else "comparing branches ...")
         command = [sys.executable, os.path.join(HERE, "list_stale_branches.py"),
-                   "--format", "json", "--all"]
+                   "--format", "json", "--all", "--repo-path", self.settings.repo_path]
         if not fetch:
             command.append("--no-fetch")
-        if self.settings.repo_path:
-            command += ["--repo-path", self.settings.repo_path]
         try:
             done = subprocess.run(command, capture_output=True, text=True, encoding="utf-8",
                                   errors="replace", timeout=900, cwd=HERE)

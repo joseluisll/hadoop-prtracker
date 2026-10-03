@@ -63,9 +63,19 @@ DEFAULT_UPSTREAM = "apache/hadoop"
 DEFAULT_FORK_REMOTE = "origin"
 DEFAULT_UPSTREAM_REMOTE = "upstream"
 DEFAULT_BASE_REF = "upstream/trunk"
+
+
 # The script lives outside the clone, so fall back to the usual checkout when
 # the working directory is not a git repository.
-DEFAULT_REPO_PATH = r"C:\dev\hadoop"
+def default_repo_path() -> str:
+    """The Hadoop clone: $HADOOP_REPO_PATH, else C:\\dev\\hadoop on Windows and ~/code/hadoop elsewhere."""
+    configured = os.environ.get("HADOOP_REPO_PATH")
+    if configured:
+        return os.path.expanduser(configured)
+    return r"C:\dev\hadoop" if os.name == "nt" else os.path.expanduser("~/code/hadoop")
+
+
+DEFAULT_REPO_PATH = default_repo_path()
 
 JIRA_RE = re.compile(r"\b(HADOOP|HDFS|YARN|MAPREDUCE|HDDS|SUBMARINE|OZONE)-(\d+)\b", re.I)
 
