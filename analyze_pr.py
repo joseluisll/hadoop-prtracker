@@ -88,7 +88,17 @@ except ImportError:  # pragma: no cover - misplaced file
 DEFAULT_REPO = "apache/hadoop"
 DEFAULT_AUTHOR = "joseluisll"
 DEFAULT_JIRA = "https://issues.apache.org/jira"
-DEFAULT_REPO_PATH = r"C:\dev\hadoop"
+
+
+def default_repo_path() -> str:
+    """The Hadoop clone: $HADOOP_REPO_PATH, else C:\\dev\\hadoop on Windows and ~/code/hadoop elsewhere."""
+    configured = os.environ.get("HADOOP_REPO_PATH")
+    if configured:
+        return os.path.expanduser(configured)
+    return r"C:\dev\hadoop" if os.name == "nt" else os.path.expanduser("~/code/hadoop")
+
+
+DEFAULT_REPO_PATH = default_repo_path()
 
 JIRA_ID_RE = re.compile(
     r"^(HADOOP|HDFS|YARN|MAPREDUCE|HDDS|OZONE|SUBMARINE)-(\d+)$", re.I

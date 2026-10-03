@@ -63,9 +63,19 @@ DEFAULT_UPSTREAM = "apache/hadoop"
 DEFAULT_FORK_REMOTE = "origin"
 DEFAULT_UPSTREAM_REMOTE = "upstream"
 DEFAULT_BASE_REF = "upstream/trunk"
+
+
 # The script lives outside the clone, so fall back to the usual checkout when
 # the working directory is not a git repository.
-DEFAULT_REPO_PATH = r"C:\dev\hadoop"
+def default_repo_path() -> str:
+    """The Hadoop clone: $HADOOP_REPO_PATH, else C:\\dev\\hadoop on Windows and ~/code/hadoop elsewhere."""
+    configured = os.environ.get("HADOOP_REPO_PATH")
+    if configured:
+        return os.path.expanduser(configured)
+    return r"C:\dev\hadoop" if os.name == "nt" else os.path.expanduser("~/code/hadoop")
+
+
+DEFAULT_REPO_PATH = default_repo_path()
 
 JIRA_RE = re.compile(r"\b(HADOOP|HDFS|YARN|MAPREDUCE|HDDS|SUBMARINE|OZONE)-(\d+)\b", re.I)
 
@@ -114,7 +124,11 @@ class Git:
         if not shutil.which("git"):
             raise SystemExit("git is not on PATH.")
         self.cwd = cwd or os.getcwd()
-        if self.run("rev-parse", "--is-inside-work-tree", check=False).strip() != "true":
+        # Run from inside prtracker's own clone, the current directory is not the Hadoop one.
+        own_clone = os.path.dirname(os.path.abspath(__file__))
+        toplevel = self.run("rev-parse", "--show-toplevel", check=False).strip()
+        if (self.run("rev-parse", "--is-inside-work-tree", check=False).strip() != "true"
+                or (not cwd and toplevel and os.path.samefile(toplevel, own_clone))):
             if cwd or not os.path.isdir(DEFAULT_REPO_PATH):
                 raise SystemExit(f"{self.cwd} is not a git clone; pass --repo-path.")
             self.cwd = DEFAULT_REPO_PATH

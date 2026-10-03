@@ -42,7 +42,9 @@ Credentials come only from the environment, never from files in this repository:
 - **JIRA** (only for writes): a personal access token for issues.apache.org in
   `JIRA_TOKEN` or `JIRA_PAT`. Reads work without it.
 
-Some commands look at a local Hadoop checkout; point them at it with `--repo-path`.
+Some commands look at a local Hadoop checkout, with `origin` your fork and `upstream`
+apache/hadoop. They use `--repo-path` if given, else `$HADOOP_REPO_PATH`, else
+`C:\dev\hadoop` on Windows and `~/code/hadoop` elsewhere.
 
 ## Examples
 
