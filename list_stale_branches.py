@@ -124,7 +124,11 @@ class Git:
         if not shutil.which("git"):
             raise SystemExit("git is not on PATH.")
         self.cwd = cwd or os.getcwd()
-        if self.run("rev-parse", "--is-inside-work-tree", check=False).strip() != "true":
+        # Run from inside prtracker's own clone, the current directory is not the Hadoop one.
+        own_clone = os.path.dirname(os.path.abspath(__file__))
+        toplevel = self.run("rev-parse", "--show-toplevel", check=False).strip()
+        if (self.run("rev-parse", "--is-inside-work-tree", check=False).strip() != "true"
+                or (not cwd and toplevel and os.path.samefile(toplevel, own_clone))):
             if cwd or not os.path.isdir(DEFAULT_REPO_PATH):
                 raise SystemExit(f"{self.cwd} is not a git clone; pass --repo-path.")
             self.cwd = DEFAULT_REPO_PATH
