@@ -10,7 +10,8 @@ One screen drives what the command-line scripts do separately:
 * Dependencies - the JIRA links (one per pair) and the 'Depends on' /
   'Required by' lists of your PR descriptions (both sides when both PRs are
   yours) the evidence asks for, for one PR or all of them, applied one change
-  at a time (fix_dependencies.py);
+  at a time (fix_dependencies.py); 'Plan all' also draws how your open PRs
+  relate to each other in pr-graph.svg, in the working directory (pr_graph.py);
 * Branches     - the stale branches of the fork (list_stale_branches.py),
   report only.
 
@@ -35,6 +36,7 @@ import subprocess
 import sys
 import webbrowser
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -43,6 +45,7 @@ try:
     import analyze_pr as core
     import fix_dependencies as fd
     import list_upstream_prs as lup
+    import pr_graph
 except ImportError as exc:  # pragma: no cover - misplaced file
     raise SystemExit(f"pr_manager.py must sit next to the other PR scripts ({exc}).")
 
@@ -250,6 +253,7 @@ class PRManager(App):
         self.plan: list[PlanItem] = []
         self.plan_notes: list[str] = []
         self.plan_scope: list[int] = []
+        self.plan_graph = False
         self.branches: list[dict[str, Any]] = []
         self.sub_title = f"{settings.author} -> {settings.repo}:{settings.base}"
 
@@ -470,10 +474,10 @@ class PRManager(App):
             self.notify("the PR list is not loaded yet", severity="warning")
             return
         self.show_tab("deps")
-        self.make_plan([str(r.number) for r in self.rows])
+        self.make_plan([str(r.number) for r in self.rows], graph=True)
 
     @work(thread=True, exclusive=True, group="bundle")
-    def make_plan(self, targets: list[str]) -> None:
+    def make_plan(self, targets: list[str], graph: bool = False) -> None:
         worker = get_current_worker()
         s, o = self.settings, self.options
         items: list[PlanItem] = []
@@ -516,10 +520,29 @@ class PRManager(App):
                 # A description of another PR: that is the one to fetch again.
                 touched = change.target[1:] if change.target.startswith("#") else ""
                 items.append(PlanItem(change, int(touched) if touched.isdigit() else number))
-        self.call_from_thread(self.fill_plan, items, notes, targets)
+        if graph:
+            notes.insert(0, self.write_graph(bundles))
+        self.call_from_thread(self.fill_plan, items, notes, targets, graph)
 
-    def fill_plan(self, items: list[PlanItem], notes: list[str], targets: list[str]) -> None:
+    def write_graph(self, bundles: list[Bundle]) -> str:
+        """Draw the open PRs and the dependencies just found; returns a note."""
+        s = self.settings
+        prs = [{"number": r.number, "title": r.title, "status": r.status, "url": r.url,
+                "jira": jira_key_in(r.title)} for r in self.rows]
+        try:  # a bug here must not take the plan down with it
+            graph = pr_graph.build_graph(prs, {b.pr["number"]: b.deps for b in bundles})
+            svg = pr_graph.render_svg(graph, f"Open PRs of {s.author} into {s.repo}:{s.base}",
+                                      datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %Z"))
+            path = pr_graph.write_svg(pr_graph.DEFAULT_GRAPH_FILE, svg)
+        except Exception as exc:
+            return f"graph not written: {exc}"
+        return (f"graph written to {path}: {len(graph.edges)} dependency(ies), "
+                f"{len(graph.overlaps)} overlap(s)")
+
+    def fill_plan(self, items: list[PlanItem], notes: list[str], targets: list[str],
+                  graph: bool) -> None:
         self.plan, self.plan_notes, self.plan_scope = items, notes, targets
+        self.plan_graph = graph
         self.refresh_plan_table()
         self.query_one("#plan-notes", Static).update(text("\n".join(notes) or "no notes"))
         scope = f"#{targets[0]}" if len(targets) == 1 else f"{len(targets)} PRs"
@@ -703,7 +726,7 @@ class PRManager(App):
         elif tab == "analysis" and self.current and self.current.pr:
             self.analyse(str(self.current.pr["number"]))
         elif tab == "deps" and self.plan_scope:
-            self.make_plan(self.plan_scope)
+            self.make_plan(self.plan_scope, self.plan_graph)
         self.show_credentials()
 
     def action_open_pr(self) -> None:
