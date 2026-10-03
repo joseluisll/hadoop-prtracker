@@ -78,6 +78,10 @@ python tests/tui_smoke.py
 `plan_smoke.py` is offline. `tui_smoke.py` drives the UI headlessly against the live PRs
 (needs GitHub access) with every write stubbed out.
 
+GitHub Actions ([ci.yml](.github/workflows/ci.yml)) compiles every script, runs each one's
+`--help` and runs `plan_smoke.py` on Ubuntu and Windows for every pull request into `main`.
+`main` is protected: changes go in through a pull request, and only once both checks pass.
+
 ## License
 
 Apache License 2.0, see [LICENSE](LICENSE).
