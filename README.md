@@ -17,6 +17,7 @@ change is shown and confirmed one by one.
 | `fix_dependencies.py` | Writes the dependencies `analyze_pr.py` finds as JIRA "Blocker" links and as a managed block in the PR description. Proposes removing UNSUPPORTED and STALE ones. |
 | `create_jira.py` | For CI/Yetus failures no PR or JIRA addresses, proposes (and on `--apply`, creates) a new JIRA. |
 | `qbt_jira.py` | Reads the nightly trunk qbt reports, ranks what they show by the open PRs fixing it would help, and proposes JIRA issues for the failures nobody tracks yet. Dry run only. |
+| `review_queue.py` | Lists every open PR into `apache/hadoop` per component (Maven module), yours and others', and recommends the top 10 to review. Read-only. |
 | `list_stale_branches.py` | Lists fork branches not related to any open PR (by history, JIRA key or earlier PRs) as STALE or CANDIDATE for cleanup. Read-only. |
 
 `analyze_pr.py` is the shared core; the others import it.
@@ -82,6 +83,54 @@ Nothing is created: `--save-dir DIR` writes each JIRA description (wiki markup) 
 prints the `create_jira.py --project ... --summary ... --description-file ...` command that
 would file it once you have reviewed it.
 
+### Review queue
+
+`review_queue.py` lists every open PR into `apache/hadoop:trunk`, yours (`*`) and everybody
+else's, grouped by component: the Maven module (nearest `pom.xml` in the clone's trunk) with
+most of the PR's changed lines. Each row shows topic, author, files, changed lines, age, review
+state and the Yetus verdict of the latest commit (`stale` when it predates that commit).
+
+It then recommends the PRs where a review helps most. Your own PRs and drafts are never
+recommended. Every point is printed with its reason under `--explain`:
+
+| Criterion | Points |
+| --- | --- |
+| Size: <= 20 changed lines / <= 100 / <= 300 / <= 1000 / larger | +20 / +15 / +10 / +4 / 0 |
+| More than 20 files | -5 |
+| Waiting: days since opened | +1 per 3 days, max 20 |
+| Untouched for 180 days (likely abandoned) | -15 |
+| Reviews: none yet / comments only / approved | +20 / +12 / +5 |
+| Changes requested: new commits since / nothing new (author's turn) | +10 / 0 |
+| You reviewed it and nothing changed since | -20 |
+| Your review was requested | +10 |
+| A committer (write access) commented on it, reviewed it or was asked to review it | +10 |
+| Yetus on the latest commit: +1 / -1 / none or stale | +15 / +5 / +3 |
+| Merge conflict or Yetus "rebase required" | -10 |
+| Topic: security / bug / flaky-test fix / build / feature, docs / dependency bump | +10 / +8 / +7 / +5 / +4 / +3 |
+| Changes main code together with its tests | +3 |
+| Area: its main component is in your area | +10 |
+| ... only another component it touches | +5 |
+
+A committer is somebody who merged a PR into the repository in the last `--committer-days`
+(default 365, the last year; the list is cached for the day), whom GitHub shows as `OWNER`, `MEMBER` or
+`COLLABORATOR` on a comment or review, or a `--committer LOGIN`. The merges carry it: GitHub
+shows most Hadoop committers as `CONTRIBUTOR`, since their apache organization membership is
+private, and only collaborators may ask for anyone's permission level. The PR's author and you do
+not count. The committers involved are printed on each recommendation.
+
+Your area is the components with at least 2 changes of yours: your commits in the clone's trunk
+in the last `--area-days` (default 365) plus your open PRs, each counted once per component.
+Only main code counts: files under `src/test/`, `pom.xml` files and root files (outside every
+module) are left out, so a test-only or build-only change adds nothing.
+
+`--focus NAME` (component or JIRA project, repeatable) replaces the learned area. The top N
+(`--top`, default 10) holds at most `--max-per-component` (default 3) PRs of one component, so
+one busy module does not fill the list. The weights are `POINTS` at the top of the script.
+
+Topic comes from the title, labels and paths (keywords such as CVE, fix, NPE, leak, race,
+flaky; dependabot or "Bump"/"Upgrade"; only test files; only docs; only poms or `dev-support/`),
+so treat it as a hint.
+
 ### Dependency verdicts
 
 `CONFIRMED`, `CI-FIX`, `LIKELY`, `WEAK`, `UNSUPPORTED`, `UNVERIFIED`, `DISCOVERED`, `STALE`.
@@ -121,6 +170,10 @@ python fix_dependencies.py --add-link MAPREDUCE-7545:HADOOP-19972 --apply
 python create_jira.py 8704
 python create_jira.py 8704 --apply --assign-me
 python list_stale_branches.py
+python review_queue.py
+python review_queue.py --view recommend --explain
+python review_queue.py --view components --others --component hadoop-hdfs-rbf
+python review_queue.py --focus YARN --top 15 --format markdown > review.md
 python qbt_jira.py
 python qbt_jira.py --show-discarded --show-description
 python qbt_jira.py --job hadoop-qbt-trunk-java21-linux-x86_64 --build 113 --format markdown
@@ -135,6 +188,7 @@ python qbt_jira.py --save-dir proposals
   still printed before it is written. In `create_jira.py` an issue that may already be filed
   is skipped rather than created.
 - Missing JIRAs are reported, never created implicitly by the dependency tools.
+- `review_queue.py` has no write mode: it only runs GraphQL queries and `git ls-tree`/`git log`.
 - `qbt_jira.py` has no write mode: it only proposes, and leaves filing to `create_jira.py`.
 
 ## Tests
@@ -142,10 +196,11 @@ python qbt_jira.py --save-dir proposals
 ```bash
 python tests/plan_smoke.py
 python tests/qbt_smoke.py
+python tests/review_smoke.py
 python tests/tui_smoke.py
 ```
 
-`plan_smoke.py` and `qbt_smoke.py` are offline. `tui_smoke.py` drives the UI headlessly against the live PRs
+`plan_smoke.py`, `qbt_smoke.py` and `review_smoke.py` are offline. `tui_smoke.py` drives the UI headlessly against the live PRs
 (needs GitHub access) with every write stubbed out.
 
 GitHub Actions ([ci.yml](.github/workflows/ci.yml)) compiles every script, runs each one's
