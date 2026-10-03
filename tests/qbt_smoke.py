@@ -157,9 +157,111 @@ assert test["summary"] == "TestLogAggregationService fails on trunk" and test["p
 assert nm["project"] == "YARN" and "NP_NULL_ON_SOME_PATH_EXCEPTION" in nm["summary"]
 # test: +10 PR, +6 test, +4 for 2 builds, +4 new = 24 (one JDK, so no JDK points)
 assert tiers[("test", TEST)] == ("P2", 24), tiers[("test", TEST)]
-# spotbugs nm: +10 clears #1, +1 aggregate #2, +5 correctness
-assert tiers[("spotbugs", NM)] == ("P3", 16), tiers[("spotbugs", NM)]
+# spotbugs nm: +10 clears #1, +5 correctness; one of the root warnings of #2 counts 0
+assert tiers[("spotbugs", NM)] == ("P3", 15), tiers[("spotbugs", NM)]
+assert any(p == 0 and "whole-repo" in r for p, r in nm["reasons"]), nm["reasons"]
 assert tiers[("lint", "")][0] == "P3"
 assert "{{hadoop.yarn.server.nodemanager.TestLogAggregationService}}" in test["description"]
 assert "HDFS-2. change" in test["description"]  # the suspect commit
+
+# Helped PRs: a whole-repo run (#2 on rumen and nm) helps nobody.
+for c in candidates.values():
+    c["helps"] = q.helps(c)
+assert [b["number"] for b in nm["helps"]] == [1] and rumen["helps"] == []
+assert [b["number"] for b in jasmine["helps"]] == [1]  # part of the -1 still counts
+ranked = sorted(candidates.values(), key=q.rank_key)
+assert [len(c["helps"]) for c in ranked] == sorted((len(c["helps"]) for c in ranked), reverse=True)
+
+# Yetus decides whether a PR fixes it; its title or description is only the lead.
+LEAF = NM.rsplit("/", 1)[-1]
+DELTA = "| %s :x: |  spotbugs  |  1m |  |  " + NM + " generated %d new + %d unchanged - %d fixed = %d total (was %d)  |"
+UNIT = "| %s |  unit  |  9m |  |  %s in the patch %s.  |"
+
+
+def report(*rows, failed=()):
+    body = list(rows)
+    if failed:
+        body += ["| Reason | Tests |", "|-------:|:------|"] + [f"| Failed junit tests | {t} |" for t in failed]
+    return core.yetus_reports({"comments": {"nodes": [yetus("2026-10-02", body)]}})
+
+
+core = q.core
+spot = {"subsystem": "spotbugs", "module": NM, "warning_count": 2,
+        "classes": {"org.apache.hadoop.yarn.server.nodemanager.Loc$Pub": ["NP_X"]}}
+assert core.yetus_verdict(spot, report(DELTA % ("+1", 0, 0, 2, 0, 2)))[0] == "verified"
+assert core.yetus_verdict(spot, report(DELTA % ("+1", 0, 1, 1, 1, 2)))[0] == "partial"
+assert core.yetus_verdict(spot, report(DELTA % ("-1", 0, 2, 0, 2, 2)))[0] == "refuted"
+verdict, why = core.yetus_verdict(spot, report(DELTA % ("-1", 1, 0, 2, 1, 2)))
+assert verdict == "verified" and "adds 1 new" in why, why  # like #8753
+assert core.yetus_verdict(spot, report(UNIT % ("+1", LEAF, "passed")))[0] == "unverified"
+assert core.yetus_verdict(spot, [])[0] == "unverified"
+EXTANT = "| -1 :x: |  spotbugs  | 1m | [/b.html](https://ci/b.html) |  " + NM + " in trunk has 2 extant spotbugs warnings.  |"
+assert core.yetus_verdict(spot, report(EXTANT, "| +1 |  spotbugs  | 1m |  |  the patch passed  |"))[0] == "refuted"
+# The newest report that checked it decides: a rebase on a clean trunk runs no spotbugs.
+older = {"comments": {"nodes": [yetus("2026-09-25", [DELTA % ("+1", 0, 0, 2, 0, 2)]),
+                                yetus("2026-10-03", [UNIT % ("+1", LEAF, "passed")])]}}
+assert core.yetus_verdict(spot, core.yetus_reports(older))[0] == "verified"
+unit_test = {"subsystem": "unit", "test": TEST, "module": NM}
+assert core.yetus_verdict(unit_test, report(UNIT % ("+1", LEAF, "passed")))[0] == "verified"
+assert core.yetus_verdict(unit_test, report(UNIT % ("-1", LEAF, "failed"), failed=[TEST]))[0] == "refuted"
+assert core.yetus_verdict(unit_test, report(DELTA % ("+1", 0, 0, 2, 0, 2)))[0] == "unverified"
+plugin = {"subsystem": "build", "project": "catalog-webapp", "plugin": "jasmine-maven-plugin"}
+assert core.yetus_verdict(plugin, report(UNIT % ("+1", "catalog-webapp", "passed")))[0] == "verified"
+assert core.yetus_verdict(plugin, report(UNIT % ("-1", "catalog-webapp", "failed")))[0] == "refuted"
+
+# Leads: a PR naming the inner class (#1) or the bug type (#3, #4) and changing
+# the class. #2 only has the type in a comment, so it is no lead. Then Yetus:
+# #1 verified, #3 refuted (kept apart), #4 merged without a report: unverified.
+LOC = f"{NM}/src/main/java/org/apache/hadoop/yarn/server/nodemanager/Loc.java"
+
+
+def node(number, title, comments=(), state="OPEN", body=""):
+    return {"number": number, "title": title, "body": body, "state": state, "url": "",
+            "mergedAt": "2026-10-03T00:00:00Z" if state == "MERGED" else None,
+            "author": {"login": "a"}, "files": {"nodes": [{"path": LOC}]},
+            "comments": {"nodes": list(comments)}}
+
+
+nodes = [node(1, "YARN-1. Fix the nullness warning in Pub.run()",
+              [yetus("2026-10-02", [DELTA % ("+1", 0, 0, 2, 0, 2)])]),
+         node(2, "YARN-2. Other", [yetus("2026-10-02", ["NP_X in Loc"])]),
+         node(3, "YARN-3. Fix NP_X in Loc", [yetus("2026-10-02", [DELTA % ("-1", 0, 2, 0, 2, 2)])]),
+         node(4, "YARN-4. Something", state="MERGED", body="SpotBugs reports NP_X.")]
+searched = []
+
+
+def fake_prs(repo, words, token):
+    searched.append(words)
+    return nodes
+
+
+def fake_jiras(base, words, since=""):
+    searched.append(["jira"] + words)
+    return []
+
+
+core.search_fixer_prs, core.search_jira_issues = fake_prs, fake_jiras
+found = core.existing_fixes({**spot, "first_seen": "2026-10-01"}, "r", None, "j", set(), set())
+assert [(p["number"], p["verified"]) for p in found["prs"]] == [(1, "verified"), (4, "unverified")], found["prs"]
+assert [p["number"] for p in found["refuted"]] == [3]
+assert ["Pub", "spotbugs"] in searched and ["NP_X"] in searched
+assert ["jira", "NP_X"] not in searched and ["jira", "Pub", "spotbugs"] not in searched, searched
+
+# Status: what the precommit showed decides the wording.
+args = q.parse_args([])
+merged = {"number": 7, "state": "MERGED", "merged": "2026-10-03", "jira": None,
+          "verified": "verified", "evidence": "its precommit of 2026-10-02 on x: '0 total'"}
+nm["tracking"] = {"prs": [merged], "jiras": [], "related": []}
+assert q.status_of(nm, args).startswith("already fixed on trunk by #7 (merged 2026-10-03)")
+nm["tracking"]["prs"] = [{**merged, "verified": "unverified"}]
+assert q.status_of(nm, args).startswith("probably fixed (not verified) on trunk by #7")
+nm["tracking"] = {"prs": [{**merged, "state": "OPEN", "verified": "unverified"}], "jiras": [],
+                  "related": [{**found["refuted"][0]}]}
+assert q.status_of(nm, args).startswith("maybe being fixed (not verified) by #7 (open, unverified)")
+assert [c.split(":")[0] for c in q.checks_of(nm)] == ["#7 unverified", "#3 refuted"], q.checks_of(nm)
+rumen["tracking"] = {"prs": [], "jiras": [], "related": []}
+assert q.status_of(rumen, args, 2) == "nobody works on it: proposal [2] below"
+# A tracked candidate is listed when it helps a PR; one that helps none is not.
+shown, hidden = q.ranking([rumen], [nm, {**test, "helps": []}], args)
+assert [e["summary"] for e, _ in shown] == [nm["summary"], rumen["summary"]] and hidden == 1
 print("qbt_smoke: OK")

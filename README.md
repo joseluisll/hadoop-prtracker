@@ -16,7 +16,7 @@ change is shown and confirmed one by one.
 | `analyze_pr.py` | Full report for one PR or JIRA id: CI (GitHub Actions and Yetus), reviews, JIRA state, dependencies with a verdict each. |
 | `fix_dependencies.py` | Writes the dependencies `analyze_pr.py` finds as JIRA "Blocker" links and as a managed block in the PR description. Proposes removing UNSUPPORTED and STALE ones. |
 | `create_jira.py` | For CI/Yetus failures no PR or JIRA addresses, proposes (and on `--apply`, creates) a new JIRA. |
-| `qbt_jira.py` | Reads the nightly trunk qbt reports and proposes JIRA issues for the failures nobody tracks yet, ranked by priority. Dry run only. |
+| `qbt_jira.py` | Reads the nightly trunk qbt reports, ranks what they show by the open PRs fixing it would help, and proposes JIRA issues for the failures nobody tracks yet. Dry run only. |
 | `list_stale_branches.py` | Lists fork branches not related to any open PR (by history, JIRA key or earlier PRs) as STALE or CANDIDATE for cleanup. Read-only. |
 
 `analyze_pr.py` is the shared core; the others import it.
@@ -30,17 +30,39 @@ failing test classes, plugin goals that fail on a module (its unit vote is -1 wi
 failing), and trunk spotbugs warnings grouped by the module whose source has them
 (`--include-lint` adds tree-wide -1 votes such as xml or pathlen).
 
-A candidate is **discarded** when an open PR, or one merged since the failing build, fixes it
-by the same matching `analyze_pr.py` uses, or when a JIRA issue unresolved (or resolved since
-that build) names it in its summary. `--show-discarded` lists them and what covers each.
+The output starts with every candidate **ranked by the open PRs it would help**: those whose
+latest precommit has a -1 that fixing it clears, or is part of. Each line names those PRs and
+their authors, and says who works on it: nobody (a JIRA is proposed), an open PR or JIRA, or a
+merged PR (a rebase of the PRs it helps picks the fix up). A PR that changes a root file (a
+LICENSE, `hadoop-project/pom.xml`, `.github/`) gets spotbugs run over the whole repo and a -1
+for its ~90 old warnings; one of those warnings is no help to that PR, so it does not count.
 
-The rest are **ranked**. Every point is printed with its reason:
+No JIRA is proposed for a candidate somebody already works on: an open PR, or one merged since
+the failing build, that fixes it, or a JIRA issue unresolved (or resolved since that build) that
+names it in its summary. The ranking still lists it when it helps open PRs; `--show-discarded`
+lists the others as well.
+
+What a PR says is only a lead. It is one when the matching of `analyze_pr.py` says it fixes the
+failure (it changes the failing test, the class with the warning, the module whose plugin
+fails); for spotbugs its title or description must also name the class (outer or inner) or the
+bug type. Every lead is then checked against its Yetus reports, the newest one that checked it:
+
+| Failure | Verified | Refuted |
+| --- | --- | --- |
+| Spotbugs | `<module> generated N new + U unchanged - F fixed = T total (was W)` with F > 0 (`partial` when it fixes only some) | F = 0, or trunk's warnings of the module and no change in the patch |
+| Unit test | the tests of its module ran and it did not fail | it is among the failed tests |
+| Plugin goal | the unit run of the module passed | the unit run of the module failed |
+
+A refuted PR does not count (it is listed as `related`); one with no report that checked it
+counts, marked `not verified`. Each line of the ranking shows the check of every PR it relies on.
+
+The proposals follow in the same order, with a priority. Every point is printed with its reason:
 
 | Criterion | Points |
 | --- | --- |
 | Open PR whose latest precommit has it, and fixing it clears that -1 | +10 each |
 | ... it is part of the -1 on its own module | +5 each |
-| ... it is a few of the warnings of an aggregate -1 (`root`, `hadoop-tools`) | +1 each |
+| ... it is one of the ~90 warnings of a whole-repo spotbugs run | 0 |
 | Open PR that had it only in an earlier precommit | +3 each |
 | (all PR points together are capped at 50) | |
 | Open PR that changes the module, so its next precommit runs into it | +1 each, max 10 |

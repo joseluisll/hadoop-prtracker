@@ -14,12 +14,19 @@ before it, and turns what they show into JIRA candidates:
 * trunk spotbugs warnings, grouped by the module whose source has them;
 * with --include-lint, a tree-wide -1 such as xml or pathlen.
 
-A candidate is discarded, and not reported, when somebody already works on
-it: an open pull request, or one merged since the failing build, that the
-same matching as analyze_pr.py says fixes it, or a JIRA issue unresolved (or
-resolved since that build) whose summary names it. The others are ranked by
-priority and printed with the reasons for it, the JIRA they would become, and
-the evidence.
+The output starts with every candidate ranked by the open PRs it would help:
+those whose latest precommit has a -1 that fixing it clears, or is part of.
+A PR that changes a root file (a LICENSE, hadoop-project/pom.xml) gets
+spotbugs run over the whole repo and a -1 for its ~90 old warnings; one of
+those is no help to it, so it does not count.
+
+No JIRA is proposed for a candidate somebody already works on: an open pull
+request, or one merged since the failing build, that the same matching as
+analyze_pr.py says fixes it, or a JIRA issue unresolved (or resolved since
+that build) whose summary names it. The ranking still lists it when it helps
+open PRs, with the PR that fixes it ("a rebase picks it up" once merged).
+The others are proposed, in the same order, with the reasons for their
+priority, the JIRA they would become, and the evidence.
 
 *This is a dry run, always.* Nothing is written to JIRA or GitHub. With
 --save-dir each proposal's description is written to a file, together with
@@ -32,9 +39,9 @@ Every candidate gets points, all shown with the reason:
     open PR whose latest precommit has it:
         fixing it clears that -1               +10 each
         it is part of the -1 on its module      +5 each
-        it is a few of the warnings of an       +1 each
-          aggregate -1 (root, hadoop-tools)
-    open PR that had it in an earlier run      +3 each (aggregate share: 0)
+        it is one of the ~90 warnings of a       0
+          whole-repo spotbugs run
+    open PR that had it in an earlier run      +3 each (whole-repo runs: 0)
         (the PR points are capped at 50)
     open PR that changes the module, so its    +1 each, at most 10
         next precommit will run into it
@@ -87,7 +94,7 @@ HISTORY = 7
 PR_DAYS = 90
 
 POINTS = {
-    "pr_clears": 10, "pr_own": 5, "pr_aggregate": 1, "pr_earlier": 3, "pr_cap": 50,
+    "pr_clears": 10, "pr_own": 5, "pr_earlier": 3, "pr_cap": 50,
     "pr_exposed": 1, "pr_exposed_cap": 10,
     "kind_build": 10, "kind_test": 6, "kind_spotbugs_bug": 5, "kind_spotbugs": 2,
     "build": 2, "build_cap": 14, "deterministic": 5, "jdks": 5, "new": 4, "aggregate_only": -5,
@@ -444,7 +451,7 @@ def failure_record(entry: dict[str, Any]) -> dict[str, Any]:
     """The candidate as analyze_pr.py describes a CI failure, for its searches."""
     kind = entry["kind"]
     if kind == "test":
-        return {"subsystem": "unit", "test": entry["test"],
+        return {"subsystem": "unit", "test": entry["test"], "module": entry["module"],
                 "detail": f"{entry['test'].rsplit('.', 1)[-1]} fails"}
     if kind == "build":
         return {"subsystem": "build", "project": entry["artifact"], "plugin": entry["plugin"],
@@ -456,6 +463,7 @@ def failure_record(entry: dict[str, Any]) -> dict[str, Any]:
             if warning["type"] not in types:
                 types.append(warning["type"])
         return {"subsystem": "spotbugs", "module": entry["module"], "classes": classes,
+                "warning_count": len(entry["warnings"]),
                 "detail": f"spotbugs on {entry['module']}"}
     return {"subsystem": entry["subsystem"], "detail": "; ".join(entry["comments"][:1])
             or f"{entry['subsystem']} votes -1 on trunk"}
@@ -624,7 +632,10 @@ def tracking(entry: dict[str, Any], repo: str, token: str | None,
     A fix merged, or an issue resolved, before the latest build that still
     fails did not fix it, so only those since then count, plus open ones.
     A JIRA counts when its summary names the failure, a PR when the matching
-    of analyze_pr.py calls it a fix rather than a mention in its description.
+    of analyze_pr.py calls it a fix rather than a mention in its description,
+    and its latest precommit does not refute it. Its title or description
+    is only the lead: each PR carries what its precommit shows ('verified',
+    'partial', 'unverified'). The refuted ones go to 'related'.
     """
     since = max((h.get("latest_date") or "" for h in entry["history"].values()), default="")
     record = {**entry["record"], "first_seen": since}
@@ -646,6 +657,7 @@ def tracking(entry: dict[str, Any], repo: str, token: str | None,
                 prs.setdefault(pr["number"], pr)
             else:
                 related.append(pr)
+        related += [pr for pr in fixes["refuted"] if pr["number"] not in prs]
         words = core.failure_words(variant)
         for issue in fixes["jiras"]:
             if any(all(w.lower() in issue["summary"].lower() for w in group) for group in words):
@@ -653,6 +665,62 @@ def tracking(entry: dict[str, Any], repo: str, token: str | None,
             else:
                 related.append(issue)
     return {"prs": list(prs.values()), "jiras": list(jiras.values()), "related": related}
+
+
+# --------------------------------------------------------------------------- #
+# The open PRs a fix would help
+# --------------------------------------------------------------------------- #
+def aggregate_total(entry: dict[str, Any]) -> int:
+    """The warnings of the biggest spotbugs report that lists it (root: ~90)."""
+    return max((entry.get("report_total") or {}).values(), default=0)
+
+
+def helps(entry: dict[str, Any]) -> list[dict[str, Any]]:
+    """Open PRs whose latest precommit -1 a fix clears, or is part of.
+
+    A PR that changes a root file gets spotbugs run over the whole repo, and
+    a -1 for its ~90 old warnings: fixing one of them helps that PR in no way.
+    The PRs that fix it are not helped by it either; they are the fix.
+    """
+    fixers = {p["number"] for p in (entry.get("tracking") or {}).get("prs", [])}
+    return [b for b in entry["blocked"] if b["when"] == "latest"
+            and b["share"] in ("clears", "own") and b["number"] not in fixers]
+
+
+def status_of(entry: dict[str, Any], args: argparse.Namespace, proposal: int = 0) -> str:
+    found = entry["tracking"]
+    verdicts = {p.get("verified", "unverified") for p in found["prs"]}
+    merged = [p for p in found["prs"] if p["state"] == "MERGED"]
+    if merged:
+        how = {"verified": "already fixed", "partial": "partly fixed"}.get(
+            merged[0].get("verified"), "probably fixed (not verified)")
+        refs = join([f"#{p['number']} (merged {p['merged']})" for p in merged])
+        return f"{how} on trunk by {refs}: a rebase of the PRs picks it up"
+    if found["prs"]:
+        how = "being fixed by" if verdicts & {"verified", "partial"} \
+            else "maybe being fixed (not verified) by"
+        return f"{how} {tracked_by(entry, args)}"
+    if found["jiras"]:
+        return f"tracked by {tracked_by(entry, args)}"
+    return f"nobody works on it: proposal [{proposal}] below" if proposal else "nobody works on it"
+
+
+def checks_of(entry: dict[str, Any]) -> list[str]:
+    """What the precommit of each PR that claims to fix it shows."""
+    found = entry["tracking"]
+    claims = found["prs"] + [p for p in found["related"] if p.get("verified") == "refuted"]
+    return [f"#{p['number']} {p['verified']}: {p['evidence']}" for p in claims if p.get("evidence")]
+
+
+def pr_list(items: list[dict[str, Any]], limit: int = 12) -> str:
+    return join([f"#{b['number']} @{b['author']}"
+                 + (" (one of its failures)" if b["share"] == "own" else "")
+                 for b in items], limit)
+
+
+def rank_key(entry: dict[str, Any]) -> tuple[int, int, str, str]:
+    """Most open PRs helped first, then the score."""
+    return -len(entry["helps"]), -entry["score"], entry["project"], entry["summary"]
 
 
 # --------------------------------------------------------------------------- #
@@ -679,14 +747,16 @@ def score(entry: dict[str, Any]) -> tuple[int, str, list[tuple[int, str]]]:
              "fixing it clears a -1 in the latest precommit of open PR(s)"),
             (blocked("latest", "own"), POINTS["pr_own"],
              "part of a -1 on its module in the latest precommit of open PR(s)"),
-            (blocked("latest", "aggregate"), POINTS["pr_aggregate"],
-             "a few of the warnings of an aggregate -1 in the latest precommit of open PR(s)"),
             ([b for b in blocked("earlier") if b["share"] != "aggregate"], POINTS["pr_earlier"],
              "in an earlier precommit of open PR(s)")):
         if items:
             gained = min(points * len(items), POINTS["pr_cap"] - pr_points)
             pr_points += gained
             add(gained, f"{text}: {prs(items)}")
+    if blocked("latest", "aggregate"):
+        add(0, f"only among the {aggregate_total(entry)} warnings of the whole-repo spotbugs run "
+               f"of open PR(s) {prs(blocked('latest', 'aggregate'))}: fixing it alone does not "
+               f"clear their -1", info=True)
     if entry["exposed"]:
         add(min(POINTS["pr_exposed"] * len(entry["exposed"]), POINTS["pr_exposed_cap"]),
             f"{len(entry['exposed'])} open PR(s) change {entry['module']}, so their next "
@@ -842,7 +912,23 @@ def render_text(proposals: list[dict[str, Any]], discarded: list[dict[str, Any]]
     out = list(header)
     out.append("")
     out.append(f"{len(proposals)} JIRA issue(s) proposed, {len(discarded)} candidate(s) "
-               f"discarded as already tracked.")
+               f"already tracked.")
+    ranked, hidden = ranking(proposals, discarded, args)
+    out.append("")
+    out.append("Ranked by the open PRs each would help (fixing it clears, or is part of, "
+               "a -1 in their latest precommit):")
+    for index, (entry, status) in enumerate(ranked, 1):
+        out.append("")
+        out.append(f"{index:2d}. helps {len(entry['helps']):2d} open PR(s)  "
+                   f"{entry['project']}: {entry['summary']}")
+        if entry["helps"]:
+            out.append(f"      PRs:    {pr_list(entry['helps'])}")
+        out.append(f"      status: {status}")
+        out += [f"      check:  {line}" for line in checks_of(entry)]
+    if hidden:
+        out.append("")
+        out.append(f"{hidden} more candidate(s) are already tracked and help no open PR; "
+                   f"--show-discarded lists them.")
     for index, entry in enumerate(proposals, 1):
         out.append("")
         out.append("-" * 78)
@@ -853,55 +939,64 @@ def render_text(proposals: list[dict[str, Any]], discarded: list[dict[str, Any]]
             out.append(f"    {points:+4d}     {reason}")
         for item in entry["tracking"]["related"][:3]:
             ref = f"#{item['number']}" if "number" in item else item["key"]
-            out.append(f"    related: {ref} {item.get('title') or item.get('summary')} "
-                       f"(mentions it, does not fix it)")
+            why = ("claims to fix it, its precommit says no" if item.get("verified") == "refuted"
+                   else "mentions it, does not fix it")
+            out.append(f"    related: {ref} {item.get('title') or item.get('summary')} ({why})")
         out.append(f"    propose: {entry['project']}, type Bug, priority "
                    f"{'Major' if entry['tier'] != 'P3' else 'Minor'}")
         if args.show_description:
             out.append("    description:")
             out += [f"      {line}" for line in entry["description"].splitlines()]
-    if discarded:
-        out.append("")
-        out.append("-" * 78)
-        if args.show_discarded:
-            out.append("Discarded, already tracked:")
-            for entry in discarded:
-                out.append(f"  {entry['tier']} {entry['score']:3d}  {entry['project']}: "
-                           f"{entry['summary']}  <- {tracked_by(entry, args)}")
-        else:
-            out.append(f"{len(discarded)} candidate(s) are already tracked; --show-discarded "
-                       f"lists them with the PR or JIRA that covers each.")
     out.append("")
     out.append("This was a dry run - nothing was created.")
     return "\n".join(out)
 
 
+def ranking(proposals: list[dict[str, Any]], discarded: list[dict[str, Any]],
+            args: argparse.Namespace) -> tuple[list[tuple[dict[str, Any], str]], int]:
+    """([(candidate, status)] by rank_key, tracked candidates left out).
+
+    A tracked candidate is worth showing when it helps open PRs: they wait for
+    its fix, or only for a rebase onto it.
+    """
+    shown = [e for e in discarded if e["helps"] or args.show_discarded]
+    number = {id(e): i for i, e in enumerate(proposals, 1)}
+    ranked = sorted(proposals + shown, key=rank_key)
+    return ([(e, status_of(e, args, number.get(id(e), 0))) for e in ranked],
+            len(discarded) - len(shown))
+
+
 def tracked_by(entry: dict[str, Any], args: argparse.Namespace) -> str:
     found = entry["tracking"]
     items = [f"{j['key']} ({j['status'] or 'open'})" for j in found["jiras"]]
-    items += [f"#{p['number']} ({p['state'].lower()}{', ' + p['jira'] if p.get('jira') else ''})"
-              for p in found["prs"]]
+    items += [f"#{p['number']} ({p['state'].lower()}{', ' + p['jira'] if p.get('jira') else ''}"
+              f", {p.get('verified', 'unverified')})" for p in found["prs"]]
     return join(items, 4)
 
 
 def render_markdown(proposals: list[dict[str, Any]], discarded: list[dict[str, Any]],
                     args: argparse.Namespace, header: list[str]) -> str:
     out = ["# qbt JIRA candidates", ""] + [f"- {h}" for h in header] + [""]
+    ranked, hidden = ranking(proposals, discarded, args)
+    out += ["## Ranked by the open PRs each would help", "",
+            "| Helps | Candidate | Open PRs it helps | Status |", "| --- | --- | --- | --- |"]
+    out += [f"| {len(e['helps'])} | {e['project']}: {e['summary']} | "
+            f"{pr_list(e['helps']) or '-'} | "
+            + "<br>".join([status] + checks_of(e)).replace("|", "/") + " |" for e, status in ranked]
+    if hidden:
+        out += ["", f"{hidden} more candidate(s) are already tracked and help no open PR."]
+    out += ["", "## Proposed JIRA issues", ""]
     out.append("| # | Tier | Score | Proposed JIRA | What |")
     out.append("| --- | --- | --- | --- | --- |")
     for index, entry in enumerate(proposals, 1):
         out.append(f"| {index} | {entry['tier']} | {entry['score']} | {entry['project']}: "
                    f"{entry['summary']} | {what_line(entry).replace('|', '/')} |")
     for index, entry in enumerate(proposals, 1):
-        out += ["", f"## {index}. {entry['project']}: {entry['summary']}", "",
+        out += ["", f"### {index}. {entry['project']}: {entry['summary']}", "",
                 f"**{entry['tier']}**, score {entry['score']}", ""]
         out += [f"- `{points:+d}` {reason}" for points, reason in entry["reasons"]]
         if args.show_description:
             out += ["", "```", entry["description"], "```"]
-    if discarded and args.show_discarded:
-        out += ["", "## Discarded, already tracked", ""]
-        out += [f"- {e['tier']} ({e['score']}) {e['project']}: {e['summary']} - "
-                f"{tracked_by(e, args)}" for e in discarded]
     return "\n".join(out)
 
 
@@ -1003,14 +1098,15 @@ def main(argv: list[str] | None = None) -> int:
         entry["project"], entry["summary"] = summary_of(entry, len(runs))
         entry["tracking"] = tracking(entry, args.repo, token, args.jira_base)
         entry["score"], entry["tier"], entry["reasons"] = score(entry)
+        entry["helps"] = helps(entry)
         if entry["tracking"]["prs"] or entry["tracking"]["jiras"]:
             discarded.append(entry)
             continue
         entry["description"] = describe(entry, runs)
         if entry["score"] >= args.min_score:
             proposals.append(entry)
-    proposals.sort(key=lambda e: (-e["score"], e["project"], e["summary"]))
-    discarded.sort(key=lambda e: (-e["score"], e["project"], e["summary"]))
+    proposals.sort(key=rank_key)
+    discarded.sort(key=rank_key)
     if args.limit:
         proposals = proposals[:args.limit]
 
@@ -1026,7 +1122,10 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"builds": header, "proposals": [plain(e) for e in proposals],
                           "discarded": [{"project": e["project"], "summary": e["summary"],
                                          "tier": e["tier"], "score": e["score"],
-                                         "tracked_by": tracked_by(e, args)} for e in discarded]},
+                                         "helps": plain({"h": e["helps"]})["h"],
+                                         "tracked_by": tracked_by(e, args),
+                                         "status": status_of(e, args),
+                                         "checks": checks_of(e)} for e in discarded]},
                          indent=2))
     elif args.format == "markdown":
         print(render_markdown(proposals, discarded, args, header))

@@ -1207,11 +1207,21 @@ query($q: String!) {
       ... on PullRequest {
         number title url body state mergedAt author { login }
         files(first: 100) { nodes { path } }
+        comments(last: 20) { nodes { author { login } body createdAt } }
       }
     }
   }
 }
 """
+# The patch-phase spotbugs row of a Yetus report:
+# '<module> generated 1 new + 0 unchanged - 1 fixed = 1 total (was 1)'.
+YETUS_SPOTBUGS_DELTA_RE = re.compile(
+    r"([\w.-]+(?:/[\w.-]+)*)\s+generated\s+(\d+)\s+new\s+\+\s+(\d+)\s+unchanged\s+-\s+"
+    r"(\d+)\s+fixed\s+=\s+(\d+)\s+total\s+\(was\s+(\d+)\)")
+# '<module> in trunk has 12 extant spotbugs warnings.' of the branch phase.
+YETUS_EXTANT_RE = re.compile(r"([\w.-]+(?:/[\w.-]+)*)\s+in\s+trunk\s+has\s+(\d+)\s+extant")
+# '<module> in the patch passed.' / '... failed.' of a unit row.
+YETUS_UNIT_RESULT_RE = re.compile(r"([\w.-]+)\s+in\s+the\s+patch\s+(passed|failed)")
 UNEXPLAINED_LIMIT = 10
 JIRA_PROJECT_OF_TREE = {"hadoop-hdfs-project": "HDFS", "hadoop-yarn-project": "YARN",
                         "hadoop-mapreduce-project": "MAPREDUCE"}
@@ -1304,24 +1314,147 @@ def search_jira_issues(jira_base: str, words: list[str], since: str = "") -> lis
     return _JIRA_SEARCH_CACHE[(text, live)]
 
 
+def yetus_reports(pr: dict[str, Any]) -> list[dict[str, Any]]:
+    """The Yetus reports of a PR, newest first: date, the spotbugs warnings of
+    each module in trunk and the delta of the patch, the unit result of each
+    module and the failed tests."""
+    bots = {b.lower() for b in DEFAULT_BOTS}
+    comments = sorted((c for c in ((pr.get("comments") or {}).get("nodes") or [])
+                       if ((c.get("author") or {}).get("login") or "").lower() in bots
+                       and "overall" in (c.get("body") or "")),
+                      key=lambda c: c.get("createdAt") or "", reverse=True)
+    reports = []
+    for comment in comments:
+        report: dict[str, Any] = {"date": (comment.get("createdAt") or "")[:10], "extant": {},
+                                  "spotbugs": {}, "unit": {}, "tests": set()}
+        in_tests = False
+        for line in (comment.get("body") or "").splitlines():
+            tests = YETUS_TESTS_RE.match(line)
+            if tests and (tests.group(1) or in_tests):
+                in_tests = True
+                report["tests"].add(tests.group(2).rsplit(".", 1)[-1])
+                continue
+            in_tests = False
+            if not YETUS_ANY_ROW_RE.match(line):
+                continue
+            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            if len(cells) < 5:
+                continue
+            subsystem, comment_text = cells[1].lower(), cells[-1]
+            if subsystem == "spotbugs" and (extant := YETUS_EXTANT_RE.search(comment_text)):
+                report["extant"][extant.group(1)] = int(extant.group(2))
+            elif subsystem == "spotbugs" and (delta := YETUS_SPOTBUGS_DELTA_RE.search(comment_text)):
+                new, unchanged, fixed, total, was = (int(n) for n in delta.groups()[1:])
+                report["spotbugs"][delta.group(1)] = {
+                    "new": new, "fixed": fixed, "total": total, "was": was,
+                    "text": delta.group(0).split(" generated ", 1)[1]}
+            elif subsystem == "unit" and (result := YETUS_UNIT_RESULT_RE.search(comment_text)):
+                report["unit"][result.group(1)] = result.group(2)
+        reports.append(report)
+    return reports
+
+
+def _by_module(table: dict[str, Any], module: str) -> Any:
+    leaf = module.rsplit("/", 1)[-1]
+    if module in table:
+        return table[module]
+    return next((v for m, v in table.items() if m.rsplit("/", 1)[-1] == leaf), None)
+
+
+def yetus_verdict(failure: dict[str, Any], reports: list[dict[str, Any]]) -> tuple[str, str]:
+    """Does the precommit of a PR show that it fixes the failure?
+
+    ('verified' | 'partial' | 'refuted' | 'unverified', the evidence), read
+    from the newest Yetus report that checked it: once trunk is clean, a
+    rebased PR's spotbugs run has nothing left to say. What a PR's title or
+    description claims is only the lead; this is the check.
+    """
+    if not reports:
+        return "unverified", "no precommit report to check it against yet"
+    if failure.get("test"):
+        simple = failure["test"].rsplit(".", 1)[-1]
+        leaf = (failure.get("module") or "").rsplit("/", 1)[-1]
+        for report in reports:
+            run = f"its precommit of {report['date']}"
+            if simple in report["tests"]:
+                return "refuted", f"{simple} still fails in {run}"
+            if leaf and leaf in report["unit"]:
+                return "verified", f"{run} ran the tests of {leaf} and {simple} did not fail"
+        return "unverified", f"no precommit of it ran the tests of {leaf or simple}"
+    if failure.get("project"):
+        leaf = failure["project"]
+        for report in reports:
+            run = f"its precommit of {report['date']}"
+            result = report["unit"].get(leaf)
+            if result == "passed":
+                return "verified", f"the unit run of {leaf} passed in {run}"
+            if result == "failed":
+                return "refuted", f"the unit run of {leaf} still fails in {run}"
+        return "unverified", f"no precommit of it ran the unit tests of {leaf}"
+    if failure.get("subsystem") == "spotbugs" and failure.get("module"):
+        module = failure["module"]
+        leaf = module.rsplit("/", 1)[-1]
+        expected = failure.get("warning_count") or 0
+        for report in reports:
+            run = f"its precommit of {report['date']}"
+            delta = _by_module(report["spotbugs"], module)
+            if delta is None:
+                extant = _by_module(report["extant"], module)
+                if extant:
+                    # Yetus prints the delta only when the count changes.
+                    return "refuted", (f"it fixes none: {run} found the {extant} warning(s) "
+                                       f"of {leaf} in trunk and no change in the patch")
+                continue
+            quoted = f"{run} on {leaf}: '{delta['text']}'"
+            if delta["fixed"] == 0:
+                return "refuted", f"it fixes no warning: {quoted}"
+            added = f" (and adds {delta['new']} new)" if delta["new"] else ""
+            if expected and delta["fixed"] < expected and delta["total"] > 0:
+                return "partial", f"it fixes {delta['fixed']} of the {expected} warnings: {quoted}"
+            return "verified", f"{quoted}{added}"
+        return "unverified", f"no precommit of it ran spotbugs on {leaf}"
+    return "unverified", f"its precommit has no check for {failure.get('subsystem')} to read"
+
+
 def existing_fixes(failure: dict[str, Any], repo: str, token: str | None, jira_base: str,
                    skip_numbers: set[int], skip_keys: set[str]) -> dict[str, Any]:
     """Pull requests of anybody, and JIRA issues, that address a failure.
 
-    A PR counts when the same matching as for the author's own PRs says it
+    A PR is a lead when the same matching as for the author's own PRs says it
     clears the failure, and it is open or was merged after the failure first
-    showed up (then a rebase clears it). A JIRA counts when it is unresolved,
-    or was resolved after the failure first showed up.
+    showed up (then a rebase clears it). For spotbugs its title or description
+    must also name a class with the warning (outer or inner) or the bug type.
+    A lead is then checked against its latest Yetus report: refuted ones are
+    returned apart, under 'refuted'; the others carry 'verified' and
+    'evidence'. A JIRA counts when it is unresolved, or was resolved after the
+    failure first showed up.
     """
     since = failure.get("first_seen") or ""
     prs: dict[int, dict[str, Any]] = {}
+    refuted: dict[int, dict[str, Any]] = {}
     jiras: dict[str, dict[str, Any]] = {}
-    for words in failure_words(failure):
+    # A spotbugs fix may name the outer class, an inner one ("PublicLocalizer.run()")
+    # or only the bug type, so PRs are searched by each. JIRAs are searched by
+    # the outer class only: a bug type alone does not say which class, and a
+    # JIRA has no files or precommit to check that against.
+    classes = failure.get("classes") or {}
+    names = list(dict.fromkeys(part.rsplit(".", 1)[-1] for cls in classes
+                               for part in cls.split("$") if part and not part.isdigit()))
+    types = list(dict.fromkeys(t for ts in classes.values() for t in ts))
+    jira_queries = failure_words(failure)
+    pr_only = [[n, failure["subsystem"]] for n in names[:4]] + [[t] for t in types[:3]]
+    for words in jira_queries + [q for q in pr_only if q not in jira_queries]:
         if not all(words):
             continue
         for node in search_fixer_prs(repo, words, token):
             number = node.get("number")
-            if number in skip_numbers or number in prs:
+            if number in skip_numbers or number in prs or number in refuted:
+                continue
+            text = f"{node.get('title') or ''} {node.get('body') or ''}"
+            # The search reads comments too, and the precommit report of every
+            # PR that touches the module quotes the warnings.
+            if classes and not any(re.search(rf"\b{re.escape(w)}\b", text)
+                                   for w in names + types):
                 continue
             merged = (node.get("mergedAt") or "")[:10]
             if node.get("state") == "CLOSED" or (node.get("state") == "MERGED" and merged < since):
@@ -1330,14 +1463,18 @@ def existing_fixes(failure: dict[str, Any], repo: str, token: str | None, jira_b
             match = ci_fix_match([failure], paths, node.get("title") or "", node.get("body") or "")
             if match and match["strength"] in ("strong", "medium"):
                 key = JIRA_IN_TEXT_RE.match((node.get("title") or "").strip())
-                prs[number] = {
+                verdict, evidence = yetus_verdict(failure, yetus_reports(node))
+                found = {
                     "number": number, "title": node.get("title") or "",
                     "url": node.get("url") or "", "state": node.get("state") or "",
                     "merged": merged, "strength": match["strength"],
                     "author": ((node.get("author") or {}) or {}).get("login", ""),
                     "jira": key.group(0).upper() if key else None,
-                    "reason": match["reason"],
+                    "reason": match["reason"], "verified": verdict, "evidence": evidence,
                 }
+                (refuted if verdict == "refuted" else prs)[number] = found
+        if words not in jira_queries:
+            continue
         for issue in search_jira_issues(jira_base, words, since):
             if issue["key"] in skip_keys or issue["key"] in jiras:
                 continue
@@ -1345,9 +1482,12 @@ def existing_fixes(failure: dict[str, Any], repo: str, token: str | None, jira_b
                 continue  # an old fix of the same test, not today's
             jiras[issue["key"]] = issue
     covered = {p["jira"] for p in prs.values() if p.get("jira")}
+    rank = {"verified": 0, "partial": 1, "unverified": 2}
     return {
-        "prs": sorted(prs.values(), key=lambda p: (p["state"] != "OPEN", p["strength"] != "strong")),
+        "prs": sorted(prs.values(), key=lambda p: (p["state"] != "OPEN", rank[p["verified"]],
+                                                   p["strength"] != "strong")),
         "jiras": [j for k, j in jiras.items() if k not in covered],
+        "refuted": list(refuted.values()),
     }
 
 
