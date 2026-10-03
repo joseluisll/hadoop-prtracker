@@ -24,3 +24,12 @@ body = "intro\n\n" + fd.build_block([dep(9)], []) + "\n\nrest"
 out = fd.add_to_block(body, "required", "#1", "- #1 (HADOOP-1) - x")
 print(out); print(core.split_managed_block(out)[1])
 print("idempotent:", fd.add_to_block(out, "required", "#1", "- #1 (HADOOP-1) - x") == out)
+assert core.split_managed_block(out)[1] == {"depends": ["#9"], "required": ["#1"]}
+assert out.split()[0] == "intro" and out.split()[-1] == "rest"   # text around the block is kept
+assert fd.add_to_block(out, "required", "#1", "- #1 (HADOOP-1) - x") == out
+plans = {n: (ch, notes) for n, ch, notes in fd.plan_all([A, B, C_], "o/r", "https://j", None, False, False, False, "me")}
+assert sorted(c.key for c in plans[1][0]) == ["add:4:depends:1", "body:1", "link:HADOOP-1>HADOOP-4",
+                                             "link:HADOOP-2>HADOOP-1", "link:HADOOP-3>HADOOP-1"]
+assert [c.key for c in plans[2][0]] == ["body:2"]
+assert plans[3][0] == []   # bob's PR is never edited and its link is already proposed for #1
+print("plan_smoke: OK")
