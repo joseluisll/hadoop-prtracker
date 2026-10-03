@@ -77,3 +77,7 @@ python tests/tui_smoke.py
 
 `plan_smoke.py` is offline. `tui_smoke.py` drives the UI headlessly against the live PRs
 (needs GitHub access) with every write stubbed out.
+
+## License
+
+Apache License 2.0, see [LICENSE](LICENSE).
