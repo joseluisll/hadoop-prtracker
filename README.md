@@ -16,9 +16,49 @@ change is shown and confirmed one by one.
 | `analyze_pr.py` | Full report for one PR or JIRA id: CI (GitHub Actions and Yetus), reviews, JIRA state, dependencies with a verdict each. |
 | `fix_dependencies.py` | Writes the dependencies `analyze_pr.py` finds as JIRA "Blocker" links and as a managed block in the PR description. Proposes removing UNSUPPORTED and STALE ones. |
 | `create_jira.py` | For CI/Yetus failures no PR or JIRA addresses, proposes (and on `--apply`, creates) a new JIRA. |
+| `qbt_jira.py` | Reads the nightly trunk qbt reports and proposes JIRA issues for the failures nobody tracks yet, ranked by priority. Dry run only. |
 | `list_stale_branches.py` | Lists fork branches not related to any open PR (by history, JIRA key or earlier PRs) as STALE or CANDIDATE for cleanup. Read-only. |
 
 `analyze_pr.py` is the shared core; the others import it.
+
+### qbt JIRA candidates
+
+`qbt_jira.py` reads the latest build of every `hadoop-qbt-trunk-javaNN-linux-x86_64`
+job on [ci-hadoop.apache.org](https://ci-hadoop.apache.org) (today JDK 17 and JDK 21), plus
+the builds before it (`--history`, default 7), and turns what they show into candidates:
+failing test classes, plugin goals that fail on a module (its unit vote is -1 with no test
+failing), and trunk spotbugs warnings grouped by the module whose source has them
+(`--include-lint` adds tree-wide -1 votes such as xml or pathlen).
+
+A candidate is **discarded** when an open PR, or one merged since the failing build, fixes it
+by the same matching `analyze_pr.py` uses, or when a JIRA issue unresolved (or resolved since
+that build) names it in its summary. `--show-discarded` lists them and what covers each.
+
+The rest are **ranked**. Every point is printed with its reason:
+
+| Criterion | Points |
+| --- | --- |
+| Open PR whose latest precommit has it, and fixing it clears that -1 | +10 each |
+| ... it is part of the -1 on its own module | +5 each |
+| ... it is a few of the warnings of an aggregate -1 (`root`, `hadoop-tools`) | +1 each |
+| Open PR that had it only in an earlier precommit | +3 each |
+| (all PR points together are capped at 50) | |
+| Open PR that changes the module, so its next precommit runs into it | +1 each, max 10 |
+| Plugin goal fails (the module's tests never run) | +10 |
+| Unit test fails | +6 |
+| Spotbugs warning in a bug category (correctness, MT correctness, security) | +5 |
+| Other spotbugs warnings | +2 |
+| Nightly builds it failed in (tests and builds only) | +2 each, max 14 |
+| Failed in every build read, 3 or more (tests and builds: deterministic, not flaky) | +5 |
+| Fails with more than one JDK (not for lint) | +5 |
+| New: absent from an earlier build read; the commits of the build it appeared in are named | +4 |
+| Only aggregate runs report it; its own module run is clean | -5 |
+
+P1 is 40 or more, P2 20 or more, P3 below. The weights are `POINTS` at the top of the script.
+
+Nothing is created: `--save-dir DIR` writes each JIRA description (wiki markup) to a file and
+prints the `create_jira.py --project ... --summary ... --description-file ...` command that
+would file it once you have reviewed it.
 
 ### Dependency verdicts
 
@@ -59,6 +99,10 @@ python fix_dependencies.py --add-link MAPREDUCE-7545:HADOOP-19972 --apply
 python create_jira.py 8704
 python create_jira.py 8704 --apply --assign-me
 python list_stale_branches.py
+python qbt_jira.py
+python qbt_jira.py --show-discarded --show-description
+python qbt_jira.py --job hadoop-qbt-trunk-java21-linux-x86_64 --build 113 --format markdown
+python qbt_jira.py --save-dir proposals
 ```
 
 ## Safety model
@@ -69,19 +113,21 @@ python list_stale_branches.py
   still printed before it is written. In `create_jira.py` an issue that may already be filed
   is skipped rather than created.
 - Missing JIRAs are reported, never created implicitly by the dependency tools.
+- `qbt_jira.py` has no write mode: it only proposes, and leaves filing to `create_jira.py`.
 
 ## Tests
 
 ```bash
 python tests/plan_smoke.py
+python tests/qbt_smoke.py
 python tests/tui_smoke.py
 ```
 
-`plan_smoke.py` is offline. `tui_smoke.py` drives the UI headlessly against the live PRs
+`plan_smoke.py` and `qbt_smoke.py` are offline. `tui_smoke.py` drives the UI headlessly against the live PRs
 (needs GitHub access) with every write stubbed out.
 
 GitHub Actions ([ci.yml](.github/workflows/ci.yml)) compiles every script, runs each one's
-`--help` and runs `plan_smoke.py` on Ubuntu and Windows for every pull request into `main`.
+`--help` and runs the offline smoke tests on Ubuntu and Windows for every pull request into `main`.
 `main` is protected: changes go in through a pull request, and only once both checks pass.
 
 ## License
