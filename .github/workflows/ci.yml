@@ -38,7 +38,7 @@ jobs:
         run: python -m compileall -q -f *.py tests
       - name: Command-line help
         run: |
-          for script in analyze_pr fix_dependencies pr_manager create_jira qbt_jira list_upstream_prs list_stale_branches; do
+          for script in analyze_pr fix_dependencies pr_manager create_jira qbt_jira list_upstream_prs list_stale_branches review_queue; do
             echo "::group::$script --help"
             python "$script.py" --help
             echo "::endgroup::"
@@ -47,3 +47,4 @@ jobs:
         run: |
           python tests/plan_smoke.py
           python tests/qbt_smoke.py
+          python tests/review_smoke.py
