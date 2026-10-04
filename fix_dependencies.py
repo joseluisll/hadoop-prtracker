@@ -64,14 +64,8 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-try:
-    import analyze_pr as core
-    from list_upstream_prs import fetch, join, resolve_token
-except ImportError:  # pragma: no cover - misplaced file
-    raise SystemExit(
-        "analyze_pr.py and list_upstream_prs.py must sit next to this script."
-    )
+import analyze_pr as core
+from list_upstream_prs import fetch, join, resolve_token
 
 # 'Blocker' on the ASF instance: outward 'blocks', inward 'is blocked by'.
 BLOCKER_LINK_TYPE = "Blocker"

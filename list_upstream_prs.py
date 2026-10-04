@@ -29,7 +29,6 @@ Examples
 from __future__ import annotations
 
 import argparse
-import csv
 import datetime as dt
 import json
 import os
@@ -156,9 +155,6 @@ def resolve_token(explicit: str | None) -> str | None:
     return None
 
 
-RETRY_CODES = (429, 502, 503, 504)
-
-
 def fetch(request: urllib.request.Request, timeout: float = 60,
           limit: int | None = None) -> tuple[int, bytes]:
     """urlopen with retries on transient failures: (status, body).
@@ -172,13 +168,12 @@ def fetch(request: urllib.request.Request, timeout: float = 60,
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 return response.status, response.read(limit)
         except urllib.error.HTTPError as exc:
-            if exc.code not in RETRY_CODES or attempt == RETRIES - 1:
+            if exc.code not in (429, 502, 503, 504) or attempt == RETRIES - 1:
                 return exc.code, exc.read()
         except (urllib.error.URLError, ssl.SSLError, ConnectionError, TimeoutError) as exc:
             if attempt == RETRIES - 1:
                 return 0, str(getattr(exc, "reason", exc)).encode()
         time.sleep(RETRY_WAIT * (attempt + 1))
-    return 0, b"unreachable"  # only when RETRIES < 1
 
 
 def graphql(query: str, variables: dict[str, Any], token: str | None) -> dict[str, Any]:
@@ -572,15 +567,6 @@ def render_markdown(rows: list[PullRequestRow]) -> str:
     return "\n".join(lines)
 
 
-def render_csv(rows: list[PullRequestRow], stream) -> None:
-    writer = csv.writer(stream, lineterminator="\n")
-    writer.writerow(["ID", "Title", "Branch", "Status", "Comments", "URL"])
-    for row in rows:
-        writer.writerow(
-            [row.number, row.title, row.branch, row.status, row.comments, row.url]
-        )
-
-
 # --------------------------------------------------------------------------- #
 # Entry point
 # --------------------------------------------------------------------------- #
@@ -634,7 +620,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--format",
-        choices=("table", "markdown", "csv", "json"),
+        choices=("table", "markdown", "json"),
         default="table",
         help="output format (default: table)",
     )
@@ -680,9 +666,6 @@ def main(argv: list[str] | None = None) -> int:
     if args.format == "json":
         json.dump([asdict(r) for r in rows], sys.stdout, indent=2)
         sys.stdout.write("\n")
-        return 0
-    if args.format == "csv":
-        render_csv(rows, sys.stdout)
         return 0
 
     if not rows:

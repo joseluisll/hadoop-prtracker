@@ -80,13 +80,9 @@ import textwrap
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-try:
-    import analyze_pr as core
-    from list_upstream_prs import (DEFAULT_BOTS, days_since, graphql, parse_yetus_comment,
-                                   resolve_token, summarise_reviews)
-except ImportError:  # pragma: no cover - misplaced file
-    raise SystemExit("analyze_pr.py and list_upstream_prs.py must sit next to this script.")
+import analyze_pr as core
+from list_upstream_prs import (DEFAULT_BOTS, days_since, graphql, parse_yetus_comment,
+                               resolve_token, summarise_reviews)
 
 ROOT = "(root)"
 NON_HUMAN = {b.lower() for b in DEFAULT_BOTS} | {"dependabot", "github-actions"}
@@ -144,7 +140,6 @@ query($q: String!, $after: String) {
 }
 """
 
-JIRA_RE = re.compile(r"\b(HADOOP|HDFS|YARN|MAPREDUCE)-\d+", re.I)
 SECURITY_RE = re.compile(r"\bcve-\d|secur|vulnerab", re.I)
 DEPENDENCY_RE = re.compile(r"^bump\b|\b(upgrade|bump)\b", re.I)
 TEST_RE = re.compile(r"flak|deflake|intermittent|\btest", re.I)
@@ -269,7 +264,7 @@ def component_name(module: str) -> str:
 
 
 def project_of(title: str, modules: list[str]) -> str:
-    match = JIRA_RE.search(title)
+    match = core.JIRA_IN_TEXT_RE.search(title)
     if match:
         return match.group(1).upper()
     for module in modules:

@@ -30,14 +30,12 @@ Examples
 --------
     python list_stale_branches.py
     python list_stale_branches.py --all --format markdown
-    python list_stale_branches.py --include-mirrors --format csv > branches.csv
     python list_stale_branches.py --no-fetch --format json | jq '.[].status'
 """
 
 from __future__ import annotations
 
 import argparse
-import csv
 import datetime as dt
 import json
 import os
@@ -49,14 +47,8 @@ import textwrap
 from dataclasses import dataclass, field, asdict
 from typing import Any, Iterable
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-try:
-    from list_upstream_prs import graphql, resolve_token
-except ImportError:  # pragma: no cover - misplaced file
-    raise SystemExit(
-        "list_upstream_prs.py must sit next to this script "
-        "(it provides the GitHub authentication helpers)."
-    )
+from analyze_pr import DEFAULT_REPO_PATH, JIRA_IN_TEXT_RE, has_commit, is_ancestor
+from list_upstream_prs import graphql, resolve_token
 
 DEFAULT_FORK = "joseluisll/hadoop"
 DEFAULT_UPSTREAM = "apache/hadoop"
@@ -64,20 +56,6 @@ DEFAULT_FORK_REMOTE = "origin"
 DEFAULT_UPSTREAM_REMOTE = "upstream"
 DEFAULT_BASE_REF = "upstream/trunk"
 
-
-# The script lives outside the clone, so fall back to the usual checkout when
-# the working directory is not a git repository.
-def default_repo_path() -> str:
-    """The Hadoop clone: $HADOOP_REPO_PATH, else C:\\dev\\hadoop on Windows and ~/code/hadoop elsewhere."""
-    configured = os.environ.get("HADOOP_REPO_PATH")
-    if configured:
-        return os.path.expanduser(configured)
-    return r"C:\dev\hadoop" if os.name == "nt" else os.path.expanduser("~/code/hadoop")
-
-
-DEFAULT_REPO_PATH = default_repo_path()
-
-JIRA_RE = re.compile(r"\b(HADOOP|HDFS|YARN|MAPREDUCE|HDDS|SUBMARINE|OZONE)-(\d+)\b", re.I)
 
 PR_SEARCH_QUERY = """
 query($q: String!, $after: String) {
@@ -152,28 +130,6 @@ class Git:
 
     def lines(self, *args: str, check: bool = True) -> list[str]:
         return [line for line in self.run(*args, check=check).splitlines() if line.strip()]
-
-    def has_ref(self, ref: str) -> bool:
-        # The ^{commit} suffix matters: 'rev-parse --verify <sha>' happily
-        # echoes back a full sha whose object is not in this clone.
-        return (
-            subprocess.run(
-                ["git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
-                cwd=self.cwd,
-                capture_output=True,
-            ).returncode
-            == 0
-        )
-
-    def is_ancestor(self, older: str, newer: str) -> bool:
-        return (
-            subprocess.run(
-                ["git", "merge-base", "--is-ancestor", older, newer],
-                cwd=self.cwd,
-                capture_output=True,
-            ).returncode
-            == 0
-        )
 
     def count(self, rev_range: str) -> int:
         out = self.run("rev-list", "--count", rev_range, check=False).strip()
@@ -301,8 +257,8 @@ def gather_pull_requests(
 # Relation analysis
 # --------------------------------------------------------------------------- #
 def jira_key(text: str) -> str | None:
-    match = JIRA_RE.search(text or "")
-    return f"{match.group(1).upper()}-{match.group(2)}" if match else None
+    match = JIRA_IN_TEXT_RE.search(text or "")
+    return match.group(0).upper() if match else None
 
 
 def compute_relations(
@@ -319,7 +275,7 @@ def compute_relations(
     for ref_name, prs in open_prs.items():
         anchor = branches.get(ref_name)
         tip = anchor.sha if anchor else (prs[0].get("headRefOid") or "")
-        if not tip or not git.has_ref(tip):
+        if not tip or not has_commit(git.cwd, tip):
             continue
 
         own = git.lines(
@@ -572,18 +528,6 @@ def render_markdown(rows: list[Row], fork: str) -> str:
     return "\n".join(lines)
 
 
-def render_csv(rows: list[Row], stream) -> None:
-    writer = csv.writer(stream, lineterminator="\n")
-    writer.writerow(
-        ["Branch", "Status", "Last commit", "Ahead", "Behind", "Age (days)", "Comments"]
-    )
-    for row in rows:
-        writer.writerow(
-            [row.branch, row.status, row.last_commit, row.ahead, row.behind,
-             row.age_days if row.age_days is not None else "", row.comments]
-        )
-
-
 # --------------------------------------------------------------------------- #
 # Entry point
 # --------------------------------------------------------------------------- #
@@ -605,7 +549,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--recent-days", type=int, default=30, help="a branch touched within this many days is a CANDIDATE (default: 30)")
     parser.add_argument("--max-pr-commits", type=int, default=25, help="commits per open-PR branch inspected for shared history (default: 25)")
     parser.add_argument("--protect", action="append", default=None, metavar="BRANCH", help="branch never reported as stale (default: trunk, main, master)")
-    parser.add_argument("--format", choices=("table", "markdown", "csv", "json"), default="table")
+    parser.add_argument("--format", choices=("table", "markdown", "json"), default="table")
     parser.add_argument("--width", type=int, default=None, help="table width (default: terminal width)")
     parser.add_argument("--repo-path", default=None, help=f"path of the git clone (default: current directory, or {DEFAULT_REPO_PATH} when it is not one)")
     parser.add_argument("--token", default=None, help="GitHub token (else $GITHUB_TOKEN or gh)")
@@ -634,7 +578,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             git.run("fetch", args.upstream_remote, check=False)
 
-    if not git.has_ref(args.base_ref):
+    if not has_commit(git.cwd, args.base_ref):
         raise SystemExit(
             f"Base ref {args.base_ref} not found; pass --base-ref or fetch "
             f"the {args.upstream_remote} remote."
@@ -681,12 +625,12 @@ def main(argv: list[str] | None = None) -> int:
 
         # How does it stand against the upstream branch carrying the same name?
         if branch.upstream_sha:
-            if not git.has_ref(branch.upstream_sha):
+            if not has_commit(git.cwd, branch.upstream_sha):
                 branch.upstream_relation = "unknown"
-            elif git.is_ancestor(branch.sha, branch.upstream_sha):
+            elif is_ancestor(git.cwd, branch.sha, branch.upstream_sha):
                 branch.upstream_relation = "behind"
                 branch.upstream_behind = git.count(f"{branch.sha}..{branch.upstream_sha}")
-            elif git.is_ancestor(branch.upstream_sha, branch.sha):
+            elif is_ancestor(git.cwd, branch.upstream_sha, branch.sha):
                 branch.upstream_relation = "ahead"
             else:
                 branch.upstream_relation = "diverged"
@@ -711,9 +655,6 @@ def main(argv: list[str] | None = None) -> int:
     if args.format == "json":
         json.dump([asdict(r) for r in rows], sys.stdout, indent=2)
         sys.stdout.write("\n")
-        return 0
-    if args.format == "csv":
-        render_csv(rows, sys.stdout)
         return 0
     if not rows:
         print("Nothing to report.")
