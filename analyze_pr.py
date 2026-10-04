@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import functools
 import html as html_lib
 import json
 import os
@@ -380,48 +381,32 @@ def find_pr_for_jira(repo: str, key: str, token: str | None) -> tuple[int | None
     return pool[0]["number"], candidates
 
 
-_MINI_CACHE: dict[tuple[str, int], dict[str, Any] | None] = {}
-_PEER_CACHE: dict[tuple[str, str], list[dict[str, Any]]] = {}
-_JIRA_PR_CACHE: dict[tuple[str, str], int | None] = {}
-
-
+@functools.lru_cache(None)
 def fetch_pr_summary(repo: str, number: int, token: str | None) -> dict[str, Any] | None:
     """Cheap lookup of another pull request (state, title, head commit)."""
-    key = (repo, number)
-    if key not in _MINI_CACHE:
-        owner, _, name = repo.partition("/")
-        try:
-            data = graphql(MINI_PR_QUERY, {"owner": owner, "name": name, "number": number}, token)
-            _MINI_CACHE[key] = ((data.get("repository") or {}) or {}).get("pullRequest")
-        except SystemExit:  # a reference to a PR that does not exist here
-            _MINI_CACHE[key] = None
-    return _MINI_CACHE[key]
+    owner, _, name = repo.partition("/")
+    try:
+        data = graphql(MINI_PR_QUERY, {"owner": owner, "name": name, "number": number}, token)
+    except SystemExit:  # a reference to a PR that does not exist here
+        return None
+    return ((data.get("repository") or {}) or {}).get("pullRequest")
 
 
+@functools.lru_cache(None)
 def fetch_peer_prs(repo: str, author: str, token: str | None) -> list[dict[str, Any]]:
     """Every other open PR of the same author, with its files and head commit."""
-    key = (repo, author.lower())
-    if key not in _PEER_CACHE:
-        query = f"repo:{repo} is:pr is:open author:{author}"
-        data = graphql(PEERS_QUERY, {"q": query}, token)
-        _PEER_CACHE[key] = [n for n in (data["search"]["nodes"] or []) if n]
-    return _PEER_CACHE[key]
+    data = graphql(PEERS_QUERY, {"q": f"repo:{repo} is:pr is:open author:{author}"}, token)
+    return [n for n in (data["search"]["nodes"] or []) if n]
 
 
+@functools.lru_cache(None)
 def pr_for_jira_cached(repo: str, key: str, token: str | None) -> int | None:
-    cache_key = (repo, key.upper())
-    if cache_key not in _JIRA_PR_CACHE:
-        number, _ = find_pr_for_jira(repo, key, token)
-        _JIRA_PR_CACHE[cache_key] = number
-    return _JIRA_PR_CACHE[cache_key]
+    return find_pr_for_jira(repo, key, token)[0]
 
 
 # --------------------------------------------------------------------------- #
 # The diff of a pull request, and what it declares
 # --------------------------------------------------------------------------- #
-_DIFF_CACHE: dict[tuple[str, int], dict[str, Any]] = {}
-
-
 def fetch_diff(repo: str, number: int, token: str | None, max_bytes: int = 4_000_000) -> str:
     data = http_get(f"https://api.github.com/repos/{repo}/pulls/{number}", token, max_bytes,
                     accept="application/vnd.github.v3.diff")
@@ -458,11 +443,9 @@ def parse_diff(text: str) -> dict[str, dict[str, Any]]:
     return files
 
 
+@functools.lru_cache(None)
 def pr_diff(repo: str, number: int, token: str | None) -> dict[str, dict[str, Any]]:
-    key = (repo, number)
-    if key not in _DIFF_CACHE:
-        _DIFF_CACHE[key] = parse_diff(fetch_diff(repo, number, token))
-    return _DIFF_CACHE[key]
+    return parse_diff(fetch_diff(repo, number, token))
 
 
 def declared_symbols(diff: dict[str, dict[str, Any]], limit: int = 60) -> dict[str, str]:
@@ -628,7 +611,6 @@ TEST_PLUGINS = ("maven-surefire-plugin", "maven-failsafe-plugin")
 ACTIONS_FAILED_RUNS = 6
 CACHE_DIR = os.path.join(tempfile.gettempdir(), "analyze_pr_cache")
 
-_CI_CACHE: dict[tuple[str, int], dict[str, Any]] = {}
 # (head repo, branch) -> the completed Actions runs: when, workflow, and
 # 'clean' when the run is green or its failures were all read.
 _ACTIONS_RUNS: dict[tuple[str, str], list[dict[str, Any]]] = {}
@@ -637,7 +619,6 @@ YETUS_ANY_ROW_RE = re.compile(r"^\|\s*[+-]?\d\b")
 # A CI fix whose failure has not been seen for this long, with at least
 # one green run of the same check since, is STALE.
 STALE_DAYS = 30
-_REPORT_CACHE: dict[str, dict[str, list[str]]] = {}
 
 
 def http_get(url: str, token: str | None = None, limit: int = 80_000_000,
@@ -737,10 +718,9 @@ def actions_failures(head_repo: str, branch: str, token: str | None) -> list[dic
     return results
 
 
+@functools.lru_cache(None)
 def spotbugs_report(url: str) -> dict[str, list[str]]:
     """class -> bug types, as named by a Jenkins spotbugs report still kept."""
-    if url in _REPORT_CACHE:
-        return _REPORT_CACHE[url]
     classes: dict[str, list[str]] = {}
     try:
         request = urllib.request.Request(url, headers={"User-Agent": "analyze-pr"})
@@ -754,7 +734,6 @@ def spotbugs_report(url: str) -> dict[str, list[str]]:
                 types.append(kind)
     except (urllib.error.URLError, ssl.SSLError, ConnectionError, TimeoutError, ValueError):
         pass  # Jenkins only keeps the last builds; the module still tells a lot
-    _REPORT_CACHE[url] = classes
     return classes
 
 
@@ -924,17 +903,15 @@ def parse_ci_failures(pr: dict[str, Any], token: str | None = None) -> list[dict
     return failures
 
 
+@functools.lru_cache(None)
 def fetch_ci_failures(repo: str, number: int, token: str | None) -> list[dict[str, Any]]:
-    key = (repo, number)
-    if key not in _CI_CACHE:
-        owner, _, name = repo.partition("/")
-        try:
-            data = graphql(CI_QUERY, {"owner": owner, "name": name, "number": number}, token)
-            pr = ((data.get("repository") or {}) or {}).get("pullRequest") or {}
-        except SystemExit:
-            pr = {}
-        _CI_CACHE[key] = {"failures": parse_ci_failures(pr, token) if pr else []}
-    return _CI_CACHE[key]["failures"]
+    owner, _, name = repo.partition("/")
+    try:
+        data = graphql(CI_QUERY, {"owner": owner, "name": name, "number": number}, token)
+        pr = ((data.get("repository") or {}) or {}).get("pullRequest") or {}
+    except SystemExit:
+        pr = {}
+    return parse_ci_failures(pr, token) if pr else []
 
 
 def _main_code(path: str) -> bool:
@@ -1175,8 +1152,6 @@ JIRA_PROJECT_OF_TREE = {"hadoop-hdfs-project": "HDFS", "hadoop-yarn-project": "Y
                         "hadoop-mapreduce-project": "MAPREDUCE"}
 MODULE_NOISE = {"hadoop", "project", "server", "client", "applications", "webapp", "common",
                 "yarn", "hdfs", "mapreduce"}
-_FIXER_SEARCH_CACHE: dict[str, list[dict[str, Any]]] = {}
-_JIRA_SEARCH_CACHE: dict[tuple[str, str], list[dict[str, Any]]] = {}
 
 
 def failure_words(failure: dict[str, Any]) -> list[list[str]]:
@@ -1220,46 +1195,50 @@ def new_jira_summary(failure: dict[str, Any]) -> str:
 
 
 def search_fixer_prs(repo: str, words: list[str], token: str | None) -> list[dict[str, Any]]:
-    query = f"repo:{repo} is:pr " + " ".join(f'"{w}"' for w in words)
-    if query not in _FIXER_SEARCH_CACHE:
-        try:
-            data = graphql(FIXER_SEARCH_QUERY, {"q": query}, token)
-            _FIXER_SEARCH_CACHE[query] = [n for n in (data["search"]["nodes"] or []) if n]
-        except SystemExit:
-            _FIXER_SEARCH_CACHE[query] = []
-    return _FIXER_SEARCH_CACHE[query]
+    return _search_prs(f"repo:{repo} is:pr " + " ".join(f'"{w}"' for w in words), token)
+
+
+@functools.lru_cache(None)
+def _search_prs(query: str, token: str | None) -> list[dict[str, Any]]:
+    try:
+        data = graphql(FIXER_SEARCH_QUERY, {"q": query}, token)
+    except SystemExit:
+        return []
+    return [n for n in (data["search"]["nodes"] or []) if n]
 
 
 def search_jira_issues(jira_base: str, words: list[str], since: str = "") -> list[dict[str, Any]]:
+    return _search_jira(jira_base, tuple(words), since[:10])
+
+
+@functools.lru_cache(None)
+def _search_jira(jira_base: str, words: tuple[str, ...], since: str) -> list[dict[str, Any]]:
     text = " ".join(w.replace('"', "") for w in words)
     # Only issues still open, or resolved since the failure showed up: a
     # well-known test has pages of old fixes that would crowd them out.
-    live = (f' AND (resolution = Unresolved OR resolved >= "{since[:10]}")'
-            if since[:10] else "")
-    if (text, live) not in _JIRA_SEARCH_CACHE:
-        # Summary and description only: every issue whose precommit a test
-        # broke quotes it in a Yetus comment, and 'text ~' would match those.
-        phrase = f'"\\"{text}\\""' if len(words) == 1 else f'"{text}"'
-        jql = (f"project in (HADOOP, HDFS, YARN, MAPREDUCE) AND "
-               f"(summary ~ {phrase} OR description ~ {phrase}){live} ORDER BY updated DESC")
-        data = jira_get(jira_base, "search", {
-            "jql": jql, "maxResults": "8",
-            "fields": "summary,status,resolution,resolutiondate,description",
-        })
-        issues = []
-        for issue in (data or {}).get("issues") or []:
-            fields = issue.get("fields") or {}
-            haystack = f"{fields.get('summary') or ''} {fields.get('description') or ''}".lower()
-            if all(w.lower() in haystack for w in words):  # JIRA's text search is loose
-                issues.append({
-                    "key": issue.get("key", ""),
-                    "summary": fields.get("summary") or "",
-                    "status": ((fields.get("status") or {}) or {}).get("name", ""),
-                    "resolution": ((fields.get("resolution") or {}) or {}).get("name", ""),
-                    "resolved": (fields.get("resolutiondate") or "")[:10],
-                })
-        _JIRA_SEARCH_CACHE[(text, live)] = issues
-    return _JIRA_SEARCH_CACHE[(text, live)]
+    live = f' AND (resolution = Unresolved OR resolved >= "{since}")' if since else ""
+    # Summary and description only: every issue whose precommit a test
+    # broke quotes it in a Yetus comment, and 'text ~' would match those.
+    phrase = f'"\\"{text}\\""' if len(words) == 1 else f'"{text}"'
+    jql = (f"project in (HADOOP, HDFS, YARN, MAPREDUCE) AND "
+           f"(summary ~ {phrase} OR description ~ {phrase}){live} ORDER BY updated DESC")
+    data = jira_get(jira_base, "search", {
+        "jql": jql, "maxResults": "8",
+        "fields": "summary,status,resolution,resolutiondate,description",
+    })
+    issues = []
+    for issue in (data or {}).get("issues") or []:
+        fields = issue.get("fields") or {}
+        haystack = f"{fields.get('summary') or ''} {fields.get('description') or ''}".lower()
+        if all(w.lower() in haystack for w in words):  # JIRA's text search is loose
+            issues.append({
+                "key": issue.get("key", ""),
+                "summary": fields.get("summary") or "",
+                "status": ((fields.get("status") or {}) or {}).get("name", ""),
+                "resolution": ((fields.get("resolution") or {}) or {}).get("name", ""),
+                "resolved": (fields.get("resolutiondate") or "")[:10],
+            })
+    return issues
 
 
 def yetus_reports(pr: dict[str, Any]) -> list[dict[str, Any]]:

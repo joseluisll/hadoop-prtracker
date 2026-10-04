@@ -63,8 +63,8 @@ STATE_STYLE = {"pending": "", "applied": "bold green", "failed": "bold red", "sk
 BRANCH_STYLE = {"STALE": "red", "CANDIDATE": "yellow", "ACTIVE": "green"}
 # In-memory caches of analyze_pr.py dropped by a refresh; the log caches on
 # disk stay, a build log never changes.
-CORE_CACHES = ("_MINI_CACHE", "_PEER_CACHE", "_JIRA_PR_CACHE", "_DIFF_CACHE", "_CI_CACHE",
-               "_FIXER_SEARCH_CACHE", "_JIRA_SEARCH_CACHE")
+CORE_CACHES = (core.fetch_pr_summary, core.fetch_peer_prs, core.pr_for_jira_cached, core.pr_diff,
+               core.fetch_ci_failures, core._search_prs, core._search_jira)
 
 
 @dataclass
@@ -715,10 +715,8 @@ class PRManager(App):
             return
         # Fetch everything again: CI may have run, JIRA may have changed.
         self.bundles.clear()
-        for name in CORE_CACHES:
-            cache = getattr(core, name, None)
-            if isinstance(cache, dict):
-                cache.clear()
+        for cached in CORE_CACHES:
+            cached.cache_clear()
         if tab == "prs":
             self.load_prs()
         elif tab == "analysis" and self.current and self.current.pr:
