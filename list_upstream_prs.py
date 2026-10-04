@@ -41,11 +41,13 @@ import sys
 import textwrap
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field, asdict
 from typing import Any, Iterable
 
 GRAPHQL_URL = "https://api.github.com/graphql"
+REST_URL = "https://api.github.com"
 RETRIES = 3
 RETRY_WAIT = 2.0  # seconds, multiplied by the attempt number
 
@@ -156,6 +158,11 @@ def resolve_token(explicit: str | None) -> str | None:
     return None
 
 
+class GraphQLUnavailable(SystemExit):
+    """GitHub refused the GraphQL endpoint itself (401/403, not a rate limit),
+    as some proxied environments do; the REST API may still answer."""
+
+
 def graphql(query: str, variables: dict[str, Any], token: str | None) -> dict[str, Any]:
     payload = json.dumps({"query": query, "variables": variables}).encode()
     headers = {
@@ -178,6 +185,8 @@ def graphql(query: str, variables: dict[str, Any], token: str | None) -> dict[st
                 time.sleep(RETRY_WAIT * (attempt + 1))
                 continue
             detail = exc.read().decode(errors="replace")[:500]
+            if exc.code in (401, 403) and "rate limit" not in detail.lower():
+                raise GraphQLUnavailable(f"GitHub API error {exc.code}: {detail}") from exc
             raise SystemExit(f"GitHub API error {exc.code}: {detail}") from exc
         except (urllib.error.URLError, ssl.SSLError, ConnectionError, TimeoutError) as exc:
             if attempt < RETRIES - 1:
@@ -189,6 +198,94 @@ def graphql(query: str, variables: dict[str, Any], token: str | None) -> dict[st
         messages = "; ".join(e.get("message", str(e)) for e in body["errors"])
         raise SystemExit(f"GraphQL error: {messages}")
     return body["data"]
+
+
+def rest(path: str, params: dict[str, Any] | None, token: str | None) -> Any:
+    """GET a GitHub REST API path ('/repos/o/r/pulls/1/files') as JSON."""
+    url = f"{REST_URL}{path}"
+    if params:
+        url += "?" + urllib.parse.urlencode(params)
+    headers = {"Accept": "application/vnd.github+json", "User-Agent": "list-upstream-prs",
+               "X-GitHub-Api-Version": "2022-11-28"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(url, headers=headers)
+    for attempt in range(RETRIES + 2):
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                return json.loads(response.read().decode())
+        except urllib.error.HTTPError as exc:  # pragma: no cover - network failure
+            detail = exc.read().decode(errors="replace")[:500]
+            # The search API allows 30 requests a minute: wait for the window.
+            limited = exc.code == 429 or (exc.code == 403 and "rate limit" in detail.lower())
+            if limited and attempt < RETRIES + 1:
+                reset = exc.headers.get("X-RateLimit-Reset") or ""
+                wait = (int(reset) - time.time() + 1) if reset.isdigit() else 0
+                time.sleep(min(max(wait, float(exc.headers.get("Retry-After") or 0), 5.0), 65.0))
+                continue
+            if exc.code in (502, 503, 504) and attempt < RETRIES - 1:
+                time.sleep(RETRY_WAIT * (attempt + 1))
+                continue
+            raise SystemExit(f"GitHub API error {exc.code} on {path}: {detail}") from exc
+        except (urllib.error.URLError, ssl.SSLError, ConnectionError, TimeoutError) as exc:
+            if attempt < RETRIES - 1:
+                time.sleep(RETRY_WAIT * (attempt + 1))
+                continue
+            reason = getattr(exc, "reason", exc)
+            raise SystemExit(f"Cannot reach the GitHub API: {reason}") from exc
+    raise SystemExit(f"GitHub API rate limit on {path}")  # pragma: no cover
+
+
+def search_prs_rest(query: str, token: str | None, limit: int = 1000,
+                    comments: int = 25) -> list[dict[str, Any]]:
+    """The PRs a search finds, shaped as the GraphQL PullRequest nodes the
+    callers read: number title url body state mergedAt isDraft updatedAt
+    author{login} files{nodes{path}} comments{nodes{author{login} createdAt body}}
+    (the last `comments` of them). Two more requests per PR."""
+    items: list[dict[str, Any]] = []
+    page = 1
+    while len(items) < limit:
+        per_page = min(100, limit - len(items))
+        data = rest("/search/issues", {"q": query, "per_page": per_page, "page": page}, token)
+        batch = [i for i in data.get("items") or [] if i.get("pull_request")]
+        items += batch
+        if len(data.get("items") or []) < per_page or page * per_page >= 1000:
+            break
+        page += 1
+    nodes = []
+    for item in items[:limit]:
+        repo = item["repository_url"].split("/repos/", 1)[1]
+        number = item["number"]
+        merged = (item.get("pull_request") or {}).get("merged_at")
+        files, page = [], 1
+        while page <= 30:  # GitHub lists at most 3000 files of a PR
+            batch = rest(f"/repos/{repo}/pulls/{number}/files",
+                         {"per_page": 100, "page": page}, token)
+            files += [{"path": f["filename"]} for f in batch]
+            if len(batch) < 100 or len(files) >= 100:
+                break
+            page += 1
+        notes: list[dict[str, Any]] = []
+        total = item.get("comments") or 0
+        if total and comments:
+            # The last `comments`: the last page, and the one before when it is short.
+            last = -(-total // comments)
+            for p in ([last - 1] if last > 1 and total % comments else []) + [last]:
+                notes += rest(f"/repos/{repo}/issues/{number}/comments",
+                              {"per_page": comments, "page": p}, token)
+            notes = notes[-comments:]
+        nodes.append({
+            "number": number, "title": item.get("title") or "", "url": item.get("html_url") or "",
+            "body": item.get("body") or "", "isDraft": bool(item.get("draft")),
+            "updatedAt": item.get("updated_at") or "", "mergedAt": merged,
+            "state": "MERGED" if merged else (item.get("state") or "").upper(),
+            "author": {"login": (item.get("user") or {}).get("login", "")},
+            "files": {"nodes": files[:100]},
+            "comments": {"nodes": [{"author": {"login": (c.get("user") or {}).get("login", "")},
+                                    "createdAt": c.get("created_at") or "",
+                                    "body": c.get("body") or ""} for c in notes]},
+        })
+    return nodes
 
 
 def fetch_pull_requests(

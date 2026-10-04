@@ -71,10 +71,12 @@ try:
         days_since,
         evaluate,
         graphql,
+        GraphQLUnavailable,
         join,
         parse_yetus_comment,
         requested_reviewers,
         resolve_token,
+        search_prs_rest,
         summarise_reviews,
         RETRIES,
         RETRY_WAIT,
@@ -1277,6 +1279,11 @@ def search_fixer_prs(repo: str, words: list[str], token: str | None) -> list[dic
         try:
             data = graphql(FIXER_SEARCH_QUERY, {"q": query}, token)
             _FIXER_SEARCH_CACHE[query] = [n for n in (data["search"]["nodes"] or []) if n]
+        except GraphQLUnavailable:
+            try:
+                _FIXER_SEARCH_CACHE[query] = search_prs_rest(query, token, limit=10, comments=20)
+            except SystemExit:
+                _FIXER_SEARCH_CACHE[query] = []
         except SystemExit:
             _FIXER_SEARCH_CACHE[query] = []
     return _FIXER_SEARCH_CACHE[query]

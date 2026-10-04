@@ -83,7 +83,8 @@ from typing import Any
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:
     import analyze_pr as core
-    from list_upstream_prs import DEFAULT_BOTS, graphql, join, resolve_token
+    from list_upstream_prs import (DEFAULT_BOTS, GraphQLUnavailable, graphql, join, resolve_token,
+                                   search_prs_rest)
 except ImportError:  # pragma: no cover - misplaced file
     raise SystemExit("analyze_pr.py and list_upstream_prs.py must sit next to this script.")
 
@@ -530,7 +531,12 @@ def fetch_open_prs(repo: str, days: int, token: str | None) -> list[dict[str, An
     query = f"repo:{repo} is:pr is:open base:trunk updated:>={since}"
     prs, after = [], None
     while True:
-        data = graphql(OPEN_PRS_QUERY, {"q": query, "after": after}, token)["search"]
+        try:
+            data = graphql(OPEN_PRS_QUERY, {"q": query, "after": after}, token)["search"]
+        except GraphQLUnavailable as exc:
+            print(f"GraphQL refused ({str(exc)[:80]}...); reading the open PRs over REST",
+                  file=sys.stderr)
+            return search_prs_rest(query, token)
         prs += [n for n in data["nodes"] or [] if n]
         if not data["pageInfo"]["hasNextPage"]:
             return prs
