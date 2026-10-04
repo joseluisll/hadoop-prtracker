@@ -119,7 +119,8 @@ query($q: String!, $after: String) {
     pageInfo { hasNextPage endCursor }
     nodes {
       ... on PullRequest {
-        number title url isDraft createdAt updatedAt baseRefName
+        number title url isDraft createdAt updatedAt baseRefName headRefName
+        headRepository { nameWithOwner }
         additions deletions changedFiles mergeable reviewDecision
         author { login }
         labels(first: 20) { nodes { name } }
@@ -158,7 +159,7 @@ def fetch_open_prs(repo: str, base: str, token: str | None) -> list[dict[str, An
     prs, after = [], None
     while True:
         data = graphql(QUERY, {"q": query, "after": after}, token)["search"]
-        prs += [n for n in data["nodes"] or [] if n]
+        prs += [core.add_actions_yetus(n, repo, token) for n in data["nodes"] or [] if n]
         print(f"\rfetched {len(prs)} open PRs", end="", file=sys.stderr, flush=True)
         if not data["pageInfo"]["hasNextPage"]:
             print(file=sys.stderr)

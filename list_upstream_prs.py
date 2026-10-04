@@ -211,7 +211,8 @@ def fetch_pull_requests(
         if not result["pageInfo"]["hasNextPage"]:
             break
         cursor = result["pageInfo"]["endCursor"]
-    return nodes
+    import analyze_pr as core  # it imports this module
+    return [core.add_actions_yetus(pr, upstream, token) for pr in nodes]
 
 
 # --------------------------------------------------------------------------- #
@@ -433,7 +434,7 @@ def evaluate(pr: dict[str, Any], bots: Iterable[str], stale_days: int) -> PullRe
             notes.append("Yetus result unknown")
         if yetus_report and yetus_report.needs_rebase:
             notes.append("patch no longer applies - rebase required")
-    elif bots:  # none: the project has no Yetus precommit to wait for
+    else:
         notes.append("Yetus not run yet")
 
     # --- merge conflicts ----------------------------------------------------- #

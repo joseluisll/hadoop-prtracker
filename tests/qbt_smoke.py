@@ -282,6 +282,18 @@ try:
     assert console["comments"] == {"spotbugs": ["hbase-server in master has 2 extant spotbugs warnings."]}
     assert q.core.YETUS_EXTANT_RE.search(console["comments"]["spotbugs"][0]).group(1) == "hbase-server"
     assert q.jdk_of("jdk21-hadoop3") == "JDK 21"
+    # console.txt of a GitHub Actions Yetus artifact: wrapped comments, section rows, -0.
+    ACTIONS = """|      |                 |            | Patch Compile Tests
++---------------------------------------------------------------------------
+|  -0  |     checkstyle  |   0m 48s   | hbase-server: The patch generated 3 new
+|      |                 |            | + 0 unchanged - 0 fixed = 3 total (was
+|      |                 |            | 0)
+|  -1  |       spotbugs  |   1m 36s   | hbase-server generated 6 new + 0
+|      |                 |            | unchanged - 0 fixed = 6 total (was 0)
+|      |                 |  36m 22s   |"""
+    assert q.core.console_rows(ACTIONS) == [
+        ("-0", "checkstyle", "hbase-server: The patch generated 3 new + 0 unchanged - 0 fixed = 3 total (was 0)"),
+        ("-1", "spotbugs", "hbase-server generated 6 new + 0 unchanged - 0 fixed = 6 total (was 0)")]
 finally:
     q.core.use_profile("hadoop")
 assert q.core.new_jira_summary({"test": "hadoop.yarn.TestX"}) == "YARN: TestX fails on trunk"

@@ -59,6 +59,7 @@ import textwrap
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 from dataclasses import dataclass, field, asdict
 from typing import Any
 
@@ -99,11 +100,12 @@ PROFILES: dict[str, dict[str, Any]] = {
                 "jobs": r"^hadoop-qbt-trunk-java\d+-linux-x86_64$"},
     },
     "hbase": {
-        # Its precommit runs as GitHub Actions checks and posts no Yetus comment.
-        "repo": "apache/hbase", "base": "master", "bots": (), "title_sep": "",
+        # Its precommit runs Yetus in GitHub Actions: no PR comment, the reports
+        # are run artifacts, read as comments of ACTIONS_YETUS_BOT (yetus_artifacts).
+        "repo": "apache/hbase", "base": "master", "bots": ("yetus-actions",), "title_sep": "",
         "jira_projects": ("HBASE",), "project": "HBASE", "jira_search": ("HBASE",),
         "dev_list": "dev@hbase.apache.org", "trees": {}, "test_trees": (),
-        "clone": "hbase", "clone_env": "HBASE_REPO_PATH",
+        "clone": "hbase", "clone_env": "HBASE_REPO_PATH", "yetus_artifacts": True,
         "qbt": {"jenkins": "https://ci-hbase.apache.org", "name": "nightly master build (HBase Nightly)",
                 "staged": "HBase Nightly/master"},
     },
@@ -416,7 +418,8 @@ def fetch_jira(base: str, key: str) -> Jira:
 def fetch_pr(repo: str, number: int, token: str | None) -> dict[str, Any] | None:
     owner, _, name = repo.partition("/")
     data = graphql(PR_QUERY, {"owner": owner, "name": name, "number": number}, token)
-    return ((data.get("repository") or {}) or {}).get("pullRequest")
+    pr = ((data.get("repository") or {}) or {}).get("pullRequest")
+    return add_actions_yetus(pr, repo, token, YETUS_COMMITS)
 
 
 def find_pr_for_jira(repo: str, key: str, token: str | None) -> tuple[int | None, list[dict]]:
@@ -664,6 +667,15 @@ GOAL_FAILURE_RE = re.compile(r"Failed to execute goal ([\w.-]+):([\w.-]+):[\w.-]
 TEST_PLUGINS = ("maven-surefire-plugin", "maven-failsafe-plugin")
 ACTIONS_FAILED_RUNS = 6
 CACHE_DIR = os.path.join(tempfile.gettempdir(), "analyze_pr_cache")
+# Where the Yetus artifacts of an Actions precommit (hbase profile) are downloaded.
+YETUS_ZIP_DIR = os.path.join(tempfile.gettempdir(), "prtracker-yetus")
+# The author given to the Yetus reports read from those artifacts, and the
+# head commits read for one PR (a listing of many reads only the latest).
+ACTIONS_YETUS_BOT = "yetus-actions"
+YETUS_COMMITS = 3
+# A passing job's artifact larger than this is not downloaded (a unit wave
+# keeps every test's output: 60 MB); its row is written as a plain +1.
+YETUS_ZIP_PASSED_MAX = 5_000_000
 
 # (head repo, branch) -> the completed Actions runs: when, workflow, and
 # 'clean' when the run is green or its failures were all read.
@@ -730,6 +742,116 @@ def build_log_failures(url: str, token: str | None = None) -> dict[str, list] | 
         data = http_get(url, token)
         return log_failures(data.decode("utf-8", "replace")) if data else None
     return disk_cached(f"log-{url}", compute)
+
+
+# A row of a Yetus console report (console.txt, console-report.txt):
+# '|  -1  |  spotbugs  |  1m 36s   | hbase-server generated 6 new', and the
+# rows below it with empty vote, subsystem and runtime that carry on its comment.
+CONSOLE_ROW_RE = re.compile(r"^\|\s*([+-]?\d)\s*\|\s*(\S*)\s*\|[^|]*\|(.*)$")
+CONSOLE_MORE_RE = re.compile(r"^\|\s*\|\s*\|\s*\|(.*)$")
+
+
+def console_rows(text: str) -> list[tuple[str, str, str]]:
+    """(vote, subsystem, comment) of every vote row of a Yetus console report."""
+    rows: list[tuple[str, str, str]] = []
+    vote, subsystem, parts = "", "", []
+
+    def flush() -> None:
+        if subsystem:
+            rows.append((vote, subsystem, " ".join("".join(parts).split())))
+    for line in text.splitlines():
+        row, more = CONSOLE_ROW_RE.match(line), CONSOLE_MORE_RE.match(line)
+        if row:
+            flush()
+            vote, subsystem, parts = row.group(1), row.group(2), [row.group(3)]
+        elif more and subsystem:
+            parts.append(more.group(1))  # a long comment is cut mid-word: joined as is
+        else:
+            flush()
+            subsystem, parts = "", []
+    flush()
+    return rows
+
+
+def yetus_artifact(url: str, artifact_id: int, token: str | None) -> dict[str, Any] | None:
+    """console.txt and the tests failed in the unit logs of a Yetus output artifact."""
+    def compute() -> dict[str, Any] | None:
+        data = http_get(url, token)
+        if not data:
+            return None
+        os.makedirs(YETUS_ZIP_DIR, exist_ok=True)
+        path = os.path.join(YETUS_ZIP_DIR, f"{artifact_id}.zip")
+        with open(path, "wb") as handle:
+            handle.write(data)
+        with zipfile.ZipFile(path) as archive:
+            def read(name: str) -> str:
+                return archive.read(name).decode("utf-8", "replace")
+            names = archive.namelist()
+            console = next((read(n) for n in names if os.path.basename(n) == "console.txt"), "")
+            tests = sorted({t for n in names if re.match(r"patch-unit-.+\.txt$", os.path.basename(n))
+                            for t in log_failures(read(n))["tests"]})
+        return {"console": console, "tests": tests}
+    return disk_cached(f"yetus-artifact-{artifact_id}", compute)
+
+
+@functools.lru_cache(None)
+def actions_yetus_comments(repo: str, head_repo: str, branch: str, token: str | None,
+                           commits: int = 1) -> tuple[dict[str, Any], ...]:
+    """The Yetus reports a GitHub Actions precommit leaves as run artifacts
+    (HBase: the Yetus General Check, JDK17 Compile and Unit Check workflows),
+    one comment per head commit, newest first, in the hadoop-yetus format, so
+    whatever reads those comments reads these too."""
+    if not (token and head_repo and branch):
+        return ()
+    listing = rest_json(f"repos/{repo}/actions/runs?event=pull_request&per_page=50&branch="
+                        f"{urllib.parse.quote(branch)}", token)
+    by_commit: dict[str, list[dict[str, Any]]] = {}
+    for run in listing.get("workflow_runs") or []:
+        if run.get("status") == "completed" and "yetus" in (run.get("name") or "").lower() \
+                and ((run.get("head_repository") or {}).get("full_name") or "") == head_repo:
+            by_commit.setdefault(run["head_sha"], []).append(run)
+    comments = []
+    for sha, runs in list(by_commit.items())[:commits]:
+        rows, tests = [], []
+        for run in runs:
+            # A green run passed every job; a red one says which jobs failed.
+            failed = set() if run.get("conclusion") == "success" else {
+                j.get("name") for j in rest_json(f"repos/{repo}/actions/runs/{run['id']}/jobs",
+                                                 token).get("jobs") or []
+                if j.get("conclusion") != "success"}
+            for artifact in rest_json(f"repos/{repo}/actions/runs/{run['id']}/artifacts",
+                                      token).get("artifacts") or []:
+                job_failed = any(job and job in artifact["name"] for job in failed)
+                if not job_failed and artifact.get("size_in_bytes", 0) > YETUS_ZIP_PASSED_MAX:
+                    # ponytail: only the unit waves are this big, so the row says unit.
+                    rows.append(("+1", "unit", f"{artifact['name']} passed"))
+                    continue
+                report = yetus_artifact(artifact["archive_download_url"], artifact["id"], token)
+                if report:
+                    rows += console_rows(report["console"])
+                    tests += report["tests"]
+        if not rows:
+            continue
+        overall = "-1" if any(vote == "-1" for vote, _, _ in rows) else "+1"
+        body = [f"**{overall} overall** (Yetus reports of the GitHub Actions runs of {sha[:10]})",
+                "", "| Vote | Subsystem | Runtime | Logfile | Comment |", "|---|---|---|---|---|"]
+        body += [f"| {vote} | {subsystem} |  |  | {comment} |" for vote, subsystem, comment in rows]
+        body += ["", "| Reason | Tests |", "|---|---|"]
+        body += [f"| Failed junit tests | {test} |" for test in dict.fromkeys(tests)]
+        comments.append({"author": {"login": ACTIONS_YETUS_BOT}, "body": "\n".join(body),
+                         "createdAt": max(r.get("updated_at") or "" for r in runs)})
+    return tuple(comments)
+
+
+def add_actions_yetus(pr: dict[str, Any], repo: str, token: str | None,
+                      commits: int = 1) -> dict[str, Any]:
+    """With a profile whose precommit posts no Yetus comment (hbase), add the
+    reports of its Actions artifacts to the PR's comments."""
+    if pr and PROFILE.get("yetus_artifacts"):
+        head = ((pr.get("headRepository") or {}) or {}).get("nameWithOwner") or ""
+        extra = actions_yetus_comments(repo, head, pr.get("headRefName") or "", token, commits)
+        pr["comments"] = {"nodes": [*((pr.get("comments") or {}).get("nodes") or []), *extra]}
+    return pr
 
 
 def actions_failures(head_repo: str, branch: str, token: str | None) -> list[dict[str, Any]]:
@@ -965,7 +1087,7 @@ def fetch_ci_failures(repo: str, number: int, token: str | None) -> list[dict[st
         pr = ((data.get("repository") or {}) or {}).get("pullRequest") or {}
     except SystemExit:
         pr = {}
-    return parse_ci_failures(pr, token) if pr else []
+    return parse_ci_failures(add_actions_yetus(pr, repo, token, YETUS_COMMITS), token) if pr else []
 
 
 def _main_code(path: str) -> bool:
@@ -1183,6 +1305,7 @@ query($q: String!) {
     nodes {
       ... on PullRequest {
         number title url body state mergedAt author { login }
+        headRefName headRepository { nameWithOwner }
         files(first: 100) { nodes { path } }
         comments(last: 20) { nodes { author { login } body createdAt } }
       }
@@ -1243,16 +1366,16 @@ def new_jira_summary(failure: dict[str, Any]) -> str:
 
 
 def search_fixer_prs(repo: str, words: list[str], token: str | None) -> list[dict[str, Any]]:
-    return _search_prs(f"repo:{repo} is:pr " + " ".join(f'"{w}"' for w in words), token)
+    return _search_prs(repo, f"repo:{repo} is:pr " + " ".join(f'"{w}"' for w in words), token)
 
 
 @functools.lru_cache(None)
-def _search_prs(query: str, token: str | None) -> list[dict[str, Any]]:
+def _search_prs(repo: str, query: str, token: str | None) -> list[dict[str, Any]]:
     try:
         data = graphql(FIXER_SEARCH_QUERY, {"q": query}, token)
     except SystemExit:
         return []
-    return [n for n in (data["search"]["nodes"] or []) if n]
+    return [add_actions_yetus(n, repo, token) for n in (data["search"]["nodes"] or []) if n]
 
 
 def search_jira_issues(jira_base: str, words: list[str], since: str = "") -> list[dict[str, Any]]:

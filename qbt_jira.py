@@ -113,8 +113,6 @@ LINT = {"blanks", "pathlen", "xml", "hadolint", "shellcheck", "pylint", "checkst
 SPECIFIC_RE = re.compile(r"^ {4}(\S[^:]*?)\s*:\s*$")
 LINKS_RE = re.compile(r"^ {3}(\S[^:]*?):\s*$")
 ITEM_RE = re.compile(r"^ {6,}(\S.*?)\s*$")
-CONSOLE_ROW_RE = re.compile(r"^\|\s*([+-]?\d)\s*\|\s*(\S*)\s*\|[^|]*\|(.*)$")
-CONSOLE_MORE_RE = re.compile(r"^\|\s*\|\s*\|\s*\|(.*)$")
 REVISION_RE = re.compile(r"^\|\s*git revision\s*\|\s*\S+\s*/\s*([0-9a-f]{7,40})", re.M)
 
 
@@ -183,26 +181,10 @@ def parse_email_report(text: str) -> dict[str, Any]:
 
 def parse_console_report(text: str) -> dict[str, Any]:
     """git revision, and the comment of every -1 row: subsystem -> [comments]."""
-    # A long comment wraps onto rows with empty vote and subsystem cells, cut
-    # mid-word: the pieces are joined as they are.
     comments: dict[str, list[str]] = {}
-    subsystem, parts = "", []
-
-    def flush() -> None:
-        if subsystem:
-            comments.setdefault(subsystem, []).append(" ".join("".join(parts).split()))
-    for line in text.splitlines():
-        row = CONSOLE_ROW_RE.match(line)
-        more = CONSOLE_MORE_RE.match(line)
-        if row:
-            flush()
-            subsystem, parts = (row.group(2), [row.group(3)]) if row.group(1) == "-1" else ("", [])
-        elif more and subsystem:
-            parts.append(more.group(1))
-        else:
-            flush()
-            subsystem, parts = "", []
-    flush()
+    for vote, subsystem, comment in core.console_rows(text):
+        if vote == "-1":
+            comments.setdefault(subsystem, []).append(comment)
     revision = REVISION_RE.search(text)
     return {"revision": revision.group(1) if revision else "", "comments": comments}
 
@@ -582,6 +564,7 @@ query($q: String!, $after: String) {
     nodes {
       ... on PullRequest {
         number title url isDraft updatedAt author { login }
+        headRefName headRepository { nameWithOwner }
         files(first: 100) { nodes { path } }
         comments(last: 25) { nodes { author { login } createdAt body } }
       }
@@ -597,7 +580,7 @@ def fetch_open_prs(repo: str, days: int, token: str | None) -> list[dict[str, An
     prs, after = [], None
     while True:
         data = graphql(OPEN_PRS_QUERY, {"q": query, "after": after}, token)["search"]
-        prs += [n for n in data["nodes"] or [] if n]
+        prs += [core.add_actions_yetus(n, repo, token) for n in data["nodes"] or [] if n]
         if not data["pageInfo"]["hasNextPage"]:
             return prs
         after = data["pageInfo"]["endCursor"]

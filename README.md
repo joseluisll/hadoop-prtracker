@@ -171,12 +171,21 @@ scripts it starts. A profile is one entry of `PROFILES` at the top of `analyze_p
 | JIRA keys recognised | HADOOP, HDFS, YARN, MAPREDUCE, HDDS, OZONE, SUBMARINE | HBASE |
 | New issues go to | HDFS, YARN or MAPREDUCE by source tree, else HADOOP | HBASE |
 | PR title convention | `HADOOP-1. Summary` | `HBASE-1 Summary` |
-| Precommit | Yetus comments by `hadoop-yetus` | GitHub Actions checks only, no Yetus comment |
+| Precommit | Yetus comments by `hadoop-yetus` | Yetus run in GitHub Actions; its reports are run artifacts |
 | Nightly build (`qbt_jira.py`) | `hadoop-qbt-trunk-javaNN-linux-x86_64` jobs on ci-hadoop.apache.org | `HBase Nightly/master` on ci-hbase.apache.org, its stages read as jobs |
 
-With HBase, the analysis of a PR's precommit comes from its GitHub Actions checks alone, since
-nothing posts a Yetus report on the PR; `qbt_jira.py` gets no per-module plugin goal
-candidates, since the HBase nightly runs the unit tests of the whole tree in one go.
+HBase posts no Yetus comment on a PR: its Yetus General Check, JDK17 Compile and Unit Check
+workflows keep their reports as run artifacts (the zip at the end of the run's summary page).
+For each PR the scripts download those zips into `prtracker-yetus` in the temp directory, read
+`console.txt` and the failed tests of the `patch-unit-*.txt` logs, and treat each head commit's
+reports as one Yetus comment, so the status, the precommit history and the CI-fix dependencies
+work as for Hadoop. One PR is read over its last 3 commits, a list of PRs over the latest only.
+A zip is downloaded once (cached by artifact id); a passing unit wave's zip (up to 60 MB, every
+test's output) is not downloaded at all. The GitHub API calls still take a few seconds per PR,
+so `review_queue.py` and `qbt_jira.py` over all open HBase PRs take a few minutes.
+
+`qbt_jira.py` gets no per-module plugin goal candidates for HBase, since its nightly runs the
+unit tests of the whole tree in one go.
 
 ## Examples
 
