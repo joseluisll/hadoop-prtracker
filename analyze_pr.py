@@ -67,7 +67,6 @@ try:
     from list_upstream_prs import (
         DEFAULT_BOTS,
         classify_contexts,
-        days_since,
         evaluate,
         graphql,
         join,
