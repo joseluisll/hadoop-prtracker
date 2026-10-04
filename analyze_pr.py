@@ -56,7 +56,6 @@ import subprocess
 import sys
 import tempfile
 import textwrap
-import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -76,8 +75,7 @@ try:
         requested_reviewers,
         resolve_token,
         summarise_reviews,
-        RETRIES,
-        RETRY_WAIT,
+        fetch,
     )
 except ImportError:  # pragma: no cover - misplaced file
     raise SystemExit(
@@ -279,27 +277,18 @@ def jira_get(base: str, path: str, params: dict[str, str] | None = None) -> dict
     )
     # ASF JIRA drops connections under a burst of requests, and a TLS reset
     # must not cost the whole report: retry, then carry on without the issue.
-    for attempt in range(RETRIES):
-        try:
-            with urllib.request.urlopen(request, timeout=45) as response:
-                return json.loads(response.read().decode())
-        except urllib.error.HTTPError as exc:
-            if exc.code in (401, 403, 404):
-                return None
-            if exc.code in (429, 502, 503, 504) and attempt < RETRIES - 1:
-                time.sleep(RETRY_WAIT * (attempt + 1))
-                continue
-            print(f"warning: JIRA error {exc.code} for {path}", file=sys.stderr)
-            return None
-        except (urllib.error.URLError, ssl.SSLError, ConnectionError,
-                TimeoutError, json.JSONDecodeError) as exc:
-            if attempt < RETRIES - 1:
-                time.sleep(RETRY_WAIT * (attempt + 1))
-                continue
-            print(f"warning: cannot reach JIRA for {path}: "
-                  f"{getattr(exc, 'reason', exc)}", file=sys.stderr)
-            return None
-    return None
+    status, data = fetch(request, timeout=45)
+    if status in (401, 403, 404):
+        return None
+    if status != 200:
+        reason = f"error {status}" if status else f"unreachable ({data.decode(errors='replace')})"
+        print(f"warning: JIRA {reason} for {path}", file=sys.stderr)
+        return None
+    try:
+        return json.loads(data.decode())
+    except ValueError:
+        print(f"warning: JIRA sent malformed JSON for {path}", file=sys.stderr)
+        return None
 
 
 @dataclass
@@ -446,25 +435,9 @@ _DIFF_CACHE: dict[tuple[str, int], dict[str, Any]] = {}
 
 
 def fetch_diff(repo: str, number: int, token: str | None, max_bytes: int = 4_000_000) -> str:
-    url = f"https://api.github.com/repos/{repo}/pulls/{number}"
-    headers = {
-        "Accept": "application/vnd.github.v3.diff",
-        "User-Agent": "analyze-pr",
-    }
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    request = urllib.request.Request(url, headers=headers)
-    for attempt in range(RETRIES):
-        try:
-            with urllib.request.urlopen(request, timeout=90) as response:
-                return response.read(max_bytes).decode("utf-8", "replace")
-        except (urllib.error.HTTPError, urllib.error.URLError, ssl.SSLError,
-                ConnectionError, TimeoutError):
-            if attempt < RETRIES - 1:
-                time.sleep(RETRY_WAIT * (attempt + 1))
-                continue
-            return ""  # the dependency is then reported as UNVERIFIED
-    return ""
+    data = http_get(f"https://api.github.com/repos/{repo}/pulls/{number}", token, max_bytes,
+                    accept="application/vnd.github.v3.diff")
+    return data.decode("utf-8", "replace") if data else ""  # "" leaves the dependency UNVERIFIED
 
 
 def parse_diff(text: str) -> dict[str, dict[str, Any]]:
@@ -689,21 +662,8 @@ def http_get(url: str, token: str | None = None, limit: int = 80_000_000,
     if token:
         # Actions logs redirect to a signed storage URL that must not get it.
         request.add_unredirected_header("Authorization", f"Bearer {token}")
-    for attempt in range(RETRIES):
-        try:
-            with urllib.request.urlopen(request, timeout=120) as response:
-                return response.read(limit)
-        except urllib.error.HTTPError as exc:
-            if exc.code in (502, 503, 504) and attempt < RETRIES - 1:
-                time.sleep(RETRY_WAIT * (attempt + 1))
-                continue
-            return None
-        except (urllib.error.URLError, ssl.SSLError, ConnectionError, TimeoutError):
-            if attempt < RETRIES - 1:
-                time.sleep(RETRY_WAIT * (attempt + 1))
-                continue
-            return None
-    return None
+    status, data = fetch(request, timeout=120, limit=limit)
+    return data if status == 200 else None
 
 
 def rest_json(path: str, token: str | None) -> dict[str, Any]:
