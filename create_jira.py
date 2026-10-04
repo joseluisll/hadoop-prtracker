@@ -51,7 +51,7 @@ def split_suggestion(suggestion: str) -> tuple[str, str]:
     """'YARN: TestX fails on trunk' -> ('YARN', 'TestX fails on trunk')."""
     project, _, summary = suggestion.partition(": ")
     if not summary or not project.isupper():
-        return "HADOOP", suggestion
+        return core.DEFAULT_PROJECT, suggestion
     return project, summary
 
 
@@ -211,7 +211,8 @@ def show(proposal: dict[str, Any], index: int, total: int, args: argparse.Namesp
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__,
-                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+                                     formatter_class=argparse.RawDescriptionHelpFormatter,
+                                     parents=[core.profile_parser(argv)])
     parser.add_argument("target", nargs="*", help="PR number(s) and/or JIRA id(s)")
     parser.add_argument("--all-open", nargs="?", const=core.DEFAULT_AUTHOR, default=None,
                         metavar="AUTHOR", help="every open PR of an author")

@@ -360,7 +360,7 @@ class PRManager(App):
         self.status_from_thread("prs", f"loading the open PRs of {s.author} ...")
         try:
             pulls = lup.fetch_pull_requests(s.repo, s.author, s.token)
-            bots = list(lup.DEFAULT_BOTS)
+            bots = list(core.DEFAULT_BOTS)
             # Drafts included: a stacked draft is where dependencies pile up.
             rows = [
                 lup.evaluate(pr, bots, s.stale_days) for pr in pulls
@@ -650,11 +650,11 @@ class PRManager(App):
     # ----- branches --------------------------------------------------------- #
     @work(thread=True, exclusive=True, group="branches")
     def load_branches(self, fetch: bool) -> None:
-        # Without a Hadoop clone list_stale_branches.py would run in this repository instead.
+        # Without a clone of the project list_stale_branches.py would run in this repository instead.
         if not self.settings.repo_path:
             self.fail_from_thread("branches", "listing the branches", RuntimeError(
-                f"no Hadoop clone at {core.DEFAULT_REPO_PATH}; "
-                "pass --repo-path or set HADOOP_REPO_PATH"))
+                f"no {core.DEFAULT_REPO} clone at {core.DEFAULT_REPO_PATH}; "
+                f"pass --repo-path or set {core.PROFILE['clone_env']}"))
             return
         self.status_from_thread("branches", "fetching and comparing branches ..." if fetch
                                 else "comparing branches ...")
@@ -746,16 +746,17 @@ class PRManager(App):
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
+        parents=[core.profile_parser(argv)],
     )
     parser.add_argument("--author", default=lup.DEFAULT_FORK_OWNER,
                         help=f"whose open PRs to list (default: {lup.DEFAULT_FORK_OWNER})")
     parser.add_argument("--repo", default=core.DEFAULT_REPO)
-    parser.add_argument("--base", default=lup.DEFAULT_BASE_BRANCH,
-                        help="target branch upstream, '*' for any (default: trunk)")
+    parser.add_argument("--base", default=core.BASE,
+                        help=f"target branch upstream, '*' for any (default: {core.BASE})")
     parser.add_argument("--jira-base", default=core.DEFAULT_JIRA)
     parser.add_argument("--repo-path", default=None,
-                        help=f"the Hadoop clone (default: {core.DEFAULT_REPO_PATH})")
+                        help=f"the project's clone (default: {core.DEFAULT_REPO_PATH})")
     parser.add_argument("--stale-days", type=int, default=14)
     parser.add_argument("--no-ci-search", action="store_true",
                         help="start with the search of others' PRs and JIRA switched off")

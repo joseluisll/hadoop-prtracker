@@ -1,6 +1,7 @@
 """Offline smoke test of review_queue.py: classify, score and rank a few made-up open PRs."""
 import contextlib, io, json, os, sys, tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+os.environ.pop("PRTRACKER_PROFILE", None)  # the fixtures are hadoop ones
 import review_queue as rq
 
 YETUS_PASS = ":confetti_ball: **+1 overall**\n| +1 :green_heart: | unit | 1m | | passed |"

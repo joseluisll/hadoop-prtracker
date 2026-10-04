@@ -154,9 +154,29 @@ Credentials come only from the environment, never from files in this repository:
 - **JIRA** (only for writes): a personal access token for issues.apache.org in
   `JIRA_TOKEN` or `JIRA_PAT`. Reads work without it.
 
-Some commands look at a local Hadoop checkout, with `origin` your fork and `upstream`
-apache/hadoop. They use `--repo-path` if given, else `$HADOOP_REPO_PATH`, else
-`C:\dev\hadoop` on Windows and `~/code/hadoop` elsewhere.
+Some commands look at a local checkout of the project, with `origin` your fork and
+`upstream` the Apache repository. They use `--repo-path` if given, else `$HADOOP_REPO_PATH`
+(`$HBASE_REPO_PATH`), else `C:\dev\hadoop` (`C:\dev\hbase`) on Windows and `~/code/hadoop`
+(`~/code/hbase`) elsewhere.
+
+## Profiles
+
+Every script works on Hadoop by default. `--profile hbase`, or `PRTRACKER_PROFILE=hbase` in
+the environment, points it at HBase instead; `pr_manager.py` passes its profile on to the
+scripts it starts. A profile is one entry of `PROFILES` at the top of `analyze_pr.py`:
+
+| | `hadoop` | `hbase` |
+| --- | --- | --- |
+| Repository, base branch | `apache/hadoop`, `trunk` | `apache/hbase`, `master` |
+| JIRA keys recognised | HADOOP, HDFS, YARN, MAPREDUCE, HDDS, OZONE, SUBMARINE | HBASE |
+| New issues go to | HDFS, YARN or MAPREDUCE by source tree, else HADOOP | HBASE |
+| PR title convention | `HADOOP-1. Summary` | `HBASE-1 Summary` |
+| Precommit | Yetus comments by `hadoop-yetus` | GitHub Actions checks only, no Yetus comment |
+| Nightly build (`qbt_jira.py`) | `hadoop-qbt-trunk-javaNN-linux-x86_64` jobs on ci-hadoop.apache.org | `HBase Nightly/master` on ci-hbase.apache.org, its stages read as jobs |
+
+With HBase, the analysis of a PR's precommit comes from its GitHub Actions checks alone, since
+nothing posts a Yetus report on the PR; `qbt_jira.py` gets no per-module plugin goal
+candidates, since the HBase nightly runs the unit tests of the whole tree in one go.
 
 ## Examples
 
@@ -179,6 +199,8 @@ python qbt_jira.py
 python qbt_jira.py --show-discarded --show-description
 python qbt_jira.py --job hadoop-qbt-trunk-java21-linux-x86_64 --build 113 --format markdown
 python qbt_jira.py --save-dir proposals
+python analyze_pr.py --profile hbase 8730
+python qbt_jira.py --profile hbase
 ```
 
 ## Safety model
