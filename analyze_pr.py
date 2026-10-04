@@ -773,25 +773,31 @@ def console_rows(text: str) -> list[tuple[str, str, str]]:
     return rows
 
 
-def yetus_artifact(url: str, artifact_id: int, token: str | None) -> dict[str, Any] | None:
+def yetus_artifact(artifact: dict[str, Any], token: str | None) -> dict[str, Any] | None:
     """console.txt and the tests failed in the unit logs of a Yetus output artifact."""
     def compute() -> dict[str, Any] | None:
-        data = http_get(url, token)
+        # A failed unit wave keeps every test's output: 200 MB and more.
+        data = http_get(artifact["archive_download_url"], token,
+                        limit=artifact.get("size_in_bytes", 0) + 1_000_000)
         if not data:
             return None
         os.makedirs(YETUS_ZIP_DIR, exist_ok=True)
-        path = os.path.join(YETUS_ZIP_DIR, f"{artifact_id}.zip")
+        path = os.path.join(YETUS_ZIP_DIR, f"{artifact['id']}.zip")
         with open(path, "wb") as handle:
             handle.write(data)
-        with zipfile.ZipFile(path) as archive:
-            def read(name: str) -> str:
-                return archive.read(name).decode("utf-8", "replace")
-            names = archive.namelist()
-            console = next((read(n) for n in names if os.path.basename(n) == "console.txt"), "")
-            tests = sorted({t for n in names if re.match(r"patch-unit-.+\.txt$", os.path.basename(n))
-                            for t in log_failures(read(n))["tests"]})
+        try:
+            with zipfile.ZipFile(path) as archive:
+                def read(name: str) -> str:
+                    return archive.read(name).decode("utf-8", "replace")
+                names = archive.namelist()
+                console = next((read(n) for n in names if os.path.basename(n) == "console.txt"), "")
+                tests = sorted({t for n in names if re.match(r"patch-unit-.+\.txt$", os.path.basename(n))
+                                for t in log_failures(read(n))["tests"]})
+        except zipfile.BadZipFile:  # cut short: tried again next time
+            os.remove(path)
+            return None
         return {"console": console, "tests": tests}
-    return disk_cached(f"yetus-artifact-{artifact_id}", compute)
+    return disk_cached(f"yetus-artifact-{artifact['id']}", compute)
 
 
 @functools.lru_cache(None)
@@ -826,7 +832,7 @@ def actions_yetus_comments(repo: str, head_repo: str, branch: str, token: str | 
                     # ponytail: only the unit waves are this big, so the row says unit.
                     rows.append(("+1", "unit", f"{artifact['name']} passed"))
                     continue
-                report = yetus_artifact(artifact["archive_download_url"], artifact["id"], token)
+                report = yetus_artifact(artifact, token)
                 if report:
                     rows += console_rows(report["console"])
                     tests += report["tests"]
