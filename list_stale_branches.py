@@ -49,7 +49,7 @@ import textwrap
 from dataclasses import dataclass, field, asdict
 from typing import Any, Iterable
 
-from analyze_pr import DEFAULT_REPO_PATH
+from analyze_pr import DEFAULT_REPO_PATH, has_commit, is_ancestor
 from list_upstream_prs import graphql, resolve_token
 
 DEFAULT_FORK = "joseluisll/hadoop"
@@ -134,28 +134,6 @@ class Git:
 
     def lines(self, *args: str, check: bool = True) -> list[str]:
         return [line for line in self.run(*args, check=check).splitlines() if line.strip()]
-
-    def has_ref(self, ref: str) -> bool:
-        # The ^{commit} suffix matters: 'rev-parse --verify <sha>' happily
-        # echoes back a full sha whose object is not in this clone.
-        return (
-            subprocess.run(
-                ["git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
-                cwd=self.cwd,
-                capture_output=True,
-            ).returncode
-            == 0
-        )
-
-    def is_ancestor(self, older: str, newer: str) -> bool:
-        return (
-            subprocess.run(
-                ["git", "merge-base", "--is-ancestor", older, newer],
-                cwd=self.cwd,
-                capture_output=True,
-            ).returncode
-            == 0
-        )
 
     def count(self, rev_range: str) -> int:
         out = self.run("rev-list", "--count", rev_range, check=False).strip()
@@ -301,7 +279,7 @@ def compute_relations(
     for ref_name, prs in open_prs.items():
         anchor = branches.get(ref_name)
         tip = anchor.sha if anchor else (prs[0].get("headRefOid") or "")
-        if not tip or not git.has_ref(tip):
+        if not tip or not has_commit(git.cwd, tip):
             continue
 
         own = git.lines(
@@ -616,7 +594,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             git.run("fetch", args.upstream_remote, check=False)
 
-    if not git.has_ref(args.base_ref):
+    if not has_commit(git.cwd, args.base_ref):
         raise SystemExit(
             f"Base ref {args.base_ref} not found; pass --base-ref or fetch "
             f"the {args.upstream_remote} remote."
@@ -663,12 +641,12 @@ def main(argv: list[str] | None = None) -> int:
 
         # How does it stand against the upstream branch carrying the same name?
         if branch.upstream_sha:
-            if not git.has_ref(branch.upstream_sha):
+            if not has_commit(git.cwd, branch.upstream_sha):
                 branch.upstream_relation = "unknown"
-            elif git.is_ancestor(branch.sha, branch.upstream_sha):
+            elif is_ancestor(git.cwd, branch.sha, branch.upstream_sha):
                 branch.upstream_relation = "behind"
                 branch.upstream_behind = git.count(f"{branch.sha}..{branch.upstream_sha}")
-            elif git.is_ancestor(branch.upstream_sha, branch.sha):
+            elif is_ancestor(git.cwd, branch.upstream_sha, branch.sha):
                 branch.upstream_relation = "ahead"
             else:
                 branch.upstream_relation = "diverged"
