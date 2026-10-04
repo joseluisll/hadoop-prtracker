@@ -90,9 +90,6 @@ def default_repo_path() -> str:
 
 DEFAULT_REPO_PATH = default_repo_path()
 
-JIRA_ID_RE = re.compile(
-    r"^(HADOOP|HDFS|YARN|MAPREDUCE|HDDS|OZONE|SUBMARINE)-(\d+)$", re.I
-)
 JIRA_IN_TEXT_RE = re.compile(
     r"\b(HADOOP|HDFS|YARN|MAPREDUCE|HDDS|OZONE|SUBMARINE)-(\d+)\b", re.I
 )
@@ -2475,7 +2472,7 @@ def resolve_target(
         jira = fetch_jira(jira_base, match.group(0).upper()) if match else None
         return jira, pr, candidates
 
-    if not JIRA_ID_RE.match(target):
+    if not JIRA_IN_TEXT_RE.fullmatch(target):
         raise SystemExit(
             f"'{target}' is neither a PR number nor a JIRA id such as HADOOP-19987."
         )

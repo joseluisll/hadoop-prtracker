@@ -140,7 +140,6 @@ query($q: String!, $after: String) {
 }
 """
 
-JIRA_RE = re.compile(r"\b(HADOOP|HDFS|YARN|MAPREDUCE)-\d+", re.I)
 SECURITY_RE = re.compile(r"\bcve-\d|secur|vulnerab", re.I)
 DEPENDENCY_RE = re.compile(r"^bump\b|\b(upgrade|bump)\b", re.I)
 TEST_RE = re.compile(r"flak|deflake|intermittent|\btest", re.I)
@@ -265,7 +264,7 @@ def component_name(module: str) -> str:
 
 
 def project_of(title: str, modules: list[str]) -> str:
-    match = JIRA_RE.search(title)
+    match = core.JIRA_IN_TEXT_RE.search(title)
     if match:
         return match.group(1).upper()
     for module in modules:

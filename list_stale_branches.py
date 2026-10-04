@@ -49,7 +49,7 @@ import textwrap
 from dataclasses import dataclass, field, asdict
 from typing import Any, Iterable
 
-from analyze_pr import DEFAULT_REPO_PATH, has_commit, is_ancestor
+from analyze_pr import DEFAULT_REPO_PATH, JIRA_IN_TEXT_RE, has_commit, is_ancestor
 from list_upstream_prs import graphql, resolve_token
 
 DEFAULT_FORK = "joseluisll/hadoop"
@@ -58,8 +58,6 @@ DEFAULT_FORK_REMOTE = "origin"
 DEFAULT_UPSTREAM_REMOTE = "upstream"
 DEFAULT_BASE_REF = "upstream/trunk"
 
-
-JIRA_RE = re.compile(r"\b(HADOOP|HDFS|YARN|MAPREDUCE|HDDS|SUBMARINE|OZONE)-(\d+)\b", re.I)
 
 PR_SEARCH_QUERY = """
 query($q: String!, $after: String) {
@@ -261,8 +259,8 @@ def gather_pull_requests(
 # Relation analysis
 # --------------------------------------------------------------------------- #
 def jira_key(text: str) -> str | None:
-    match = JIRA_RE.search(text or "")
-    return f"{match.group(1).upper()}-{match.group(2)}" if match else None
+    match = JIRA_IN_TEXT_RE.search(text or "")
+    return match.group(0).upper() if match else None
 
 
 def compute_relations(
