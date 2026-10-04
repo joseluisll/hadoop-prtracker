@@ -59,10 +59,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import ssl
 import sys
-import time
-import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -70,7 +67,7 @@ from typing import Any, Callable
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:
     import analyze_pr as core
-    from list_upstream_prs import RETRIES, RETRY_WAIT, join, resolve_token
+    from list_upstream_prs import fetch, join, resolve_token
 except ImportError:  # pragma: no cover - misplaced file
     raise SystemExit(
         "analyze_pr.py and list_upstream_prs.py must sit next to this script."
@@ -105,24 +102,10 @@ def request_json(url: str, token: str | None, method: str = "GET",
         headers["Content-Type"] = "application/json"
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    request = urllib.request.Request(url, data=data, headers=headers, method=method)
-    for attempt in range(RETRIES):
-        try:
-            with urllib.request.urlopen(request, timeout=60) as response:
-                body = response.read()
-                return response.status, (json.loads(body) if body.strip() else None)
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode(errors="replace")[:400]
-            if exc.code in (429, 502, 503, 504) and attempt < RETRIES - 1:
-                time.sleep(RETRY_WAIT * (attempt + 1))
-                continue
-            return exc.code, detail
-        except (urllib.error.URLError, ssl.SSLError, ConnectionError, TimeoutError) as exc:
-            if attempt < RETRIES - 1:
-                time.sleep(RETRY_WAIT * (attempt + 1))
-                continue
-            return 0, str(getattr(exc, "reason", exc))
-    return 0, "unreachable"
+    status, body = fetch(urllib.request.Request(url, data=data, headers=headers, method=method))
+    if not 200 <= status < 300:
+        return status, body.decode(errors="replace")[:400]
+    return status, (json.loads(body) if body.strip() else None)
 
 
 # --------------------------------------------------------------------------- #

@@ -156,6 +156,31 @@ def resolve_token(explicit: str | None) -> str | None:
     return None
 
 
+RETRY_CODES = (429, 502, 503, 504)
+
+
+def fetch(request: urllib.request.Request, timeout: float = 60,
+          limit: int | None = None) -> tuple[int, bytes]:
+    """urlopen with retries on transient failures: (status, body).
+
+    An HTTP error comes back as (code, error body), an unreachable host as
+    (0, reason). Long runs hit the odd dropped connection or TLS reset; a
+    couple of retries are cheaper than losing the whole report.
+    """
+    for attempt in range(RETRIES):
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return response.status, response.read(limit)
+        except urllib.error.HTTPError as exc:
+            if exc.code not in RETRY_CODES or attempt == RETRIES - 1:
+                return exc.code, exc.read()
+        except (urllib.error.URLError, ssl.SSLError, ConnectionError, TimeoutError) as exc:
+            if attempt == RETRIES - 1:
+                return 0, str(getattr(exc, "reason", exc)).encode()
+        time.sleep(RETRY_WAIT * (attempt + 1))
+    return 0, b"unreachable"  # only when RETRIES < 1
+
+
 def graphql(query: str, variables: dict[str, Any], token: str | None) -> dict[str, Any]:
     payload = json.dumps({"query": query, "variables": variables}).encode()
     headers = {
@@ -165,26 +190,12 @@ def graphql(query: str, variables: dict[str, Any], token: str | None) -> dict[st
     }
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    request = urllib.request.Request(GRAPHQL_URL, data=payload, headers=headers)
-    # Long runs hit the odd dropped connection or TLS reset; a couple of
-    # retries are cheaper than losing the whole report.
-    for attempt in range(RETRIES):
-        try:
-            with urllib.request.urlopen(request, timeout=60) as response:
-                body = json.loads(response.read().decode())
-            break
-        except urllib.error.HTTPError as exc:  # pragma: no cover - network failure
-            if exc.code in (502, 503, 504) and attempt < RETRIES - 1:
-                time.sleep(RETRY_WAIT * (attempt + 1))
-                continue
-            detail = exc.read().decode(errors="replace")[:500]
-            raise SystemExit(f"GitHub API error {exc.code}: {detail}") from exc
-        except (urllib.error.URLError, ssl.SSLError, ConnectionError, TimeoutError) as exc:
-            if attempt < RETRIES - 1:
-                time.sleep(RETRY_WAIT * (attempt + 1))
-                continue
-            reason = getattr(exc, "reason", exc)
-            raise SystemExit(f"Cannot reach the GitHub API: {reason}") from exc
+    status, data = fetch(urllib.request.Request(GRAPHQL_URL, data=payload, headers=headers))
+    if status == 0:
+        raise SystemExit(f"Cannot reach the GitHub API: {data.decode(errors='replace')}")
+    if status != 200:
+        raise SystemExit(f"GitHub API error {status}: {data.decode(errors='replace')[:500]}")
+    body = json.loads(data.decode())
     if body.get("errors"):
         messages = "; ".join(e.get("message", str(e)) for e in body["errors"])
         raise SystemExit(f"GraphQL error: {messages}")
