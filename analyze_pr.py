@@ -44,7 +44,6 @@ Examples
 from __future__ import annotations
 
 import argparse
-import csv
 import datetime
 import html as html_lib
 import json
@@ -2420,19 +2419,6 @@ def render_markdown(reports: list[Report]) -> str:
     return "\n".join(lines)
 
 
-def render_csv(reports: list[Report], stream) -> None:
-    writer = csv.writer(stream, lineterminator="\n")
-    writer.writerow(
-        ["JIRA-ID", "JIRA title", "PR ID", "PR title", "Status", "Comments",
-         "Depends on", "Suggestion"]
-    )
-    for r in reports:
-        writer.writerow(
-            [r.jira_id, r.jira_title, r.pr_id, r.pr_title, r.status, r.comments,
-             r.dependencies, r.suggestion]
-        )
-
-
 # --------------------------------------------------------------------------- #
 # Entry point
 # --------------------------------------------------------------------------- #
@@ -2454,7 +2440,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--no-deps", action="store_true", help="skip the search for dependencies on other pull requests")
     parser.add_argument("--no-ci-search", action="store_true", help="do not look for PRs of others or JIRA issues that fix the failures none of your PRs clears")
     parser.add_argument("--no-diffs", action="store_true", help="do not download the diffs; dependencies are then reported as declared, without a verdict")
-    parser.add_argument("--format", choices=("report", "markdown", "csv", "json"), default="report")
+    parser.add_argument("--format", choices=("report", "markdown", "json"), default="report")
     parser.add_argument("--width", type=int, default=None, help="report width (default: terminal width)")
     parser.add_argument("--token", default=None, help="GitHub token (else $GITHUB_TOKEN or gh)")
     return parser.parse_args(argv)
@@ -2530,9 +2516,6 @@ def main(argv: list[str] | None = None) -> int:
     if args.format == "json":
         json.dump([asdict(r) for r in reports], sys.stdout, indent=2)
         sys.stdout.write("\n")
-        return 0
-    if args.format == "csv":
-        render_csv(reports, sys.stdout)
         return 0
     if args.format == "markdown":
         print(render_markdown(reports))

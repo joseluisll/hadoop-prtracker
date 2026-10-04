@@ -29,7 +29,6 @@ Examples
 from __future__ import annotations
 
 import argparse
-import csv
 import datetime as dt
 import json
 import os
@@ -568,15 +567,6 @@ def render_markdown(rows: list[PullRequestRow]) -> str:
     return "\n".join(lines)
 
 
-def render_csv(rows: list[PullRequestRow], stream) -> None:
-    writer = csv.writer(stream, lineterminator="\n")
-    writer.writerow(["ID", "Title", "Branch", "Status", "Comments", "URL"])
-    for row in rows:
-        writer.writerow(
-            [row.number, row.title, row.branch, row.status, row.comments, row.url]
-        )
-
-
 # --------------------------------------------------------------------------- #
 # Entry point
 # --------------------------------------------------------------------------- #
@@ -630,7 +620,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--format",
-        choices=("table", "markdown", "csv", "json"),
+        choices=("table", "markdown", "json"),
         default="table",
         help="output format (default: table)",
     )
@@ -676,9 +666,6 @@ def main(argv: list[str] | None = None) -> int:
     if args.format == "json":
         json.dump([asdict(r) for r in rows], sys.stdout, indent=2)
         sys.stdout.write("\n")
-        return 0
-    if args.format == "csv":
-        render_csv(rows, sys.stdout)
         return 0
 
     if not rows:

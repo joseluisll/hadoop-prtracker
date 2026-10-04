@@ -30,14 +30,12 @@ Examples
 --------
     python list_stale_branches.py
     python list_stale_branches.py --all --format markdown
-    python list_stale_branches.py --include-mirrors --format csv > branches.csv
     python list_stale_branches.py --no-fetch --format json | jq '.[].status'
 """
 
 from __future__ import annotations
 
 import argparse
-import csv
 import datetime as dt
 import json
 import os
@@ -530,18 +528,6 @@ def render_markdown(rows: list[Row], fork: str) -> str:
     return "\n".join(lines)
 
 
-def render_csv(rows: list[Row], stream) -> None:
-    writer = csv.writer(stream, lineterminator="\n")
-    writer.writerow(
-        ["Branch", "Status", "Last commit", "Ahead", "Behind", "Age (days)", "Comments"]
-    )
-    for row in rows:
-        writer.writerow(
-            [row.branch, row.status, row.last_commit, row.ahead, row.behind,
-             row.age_days if row.age_days is not None else "", row.comments]
-        )
-
-
 # --------------------------------------------------------------------------- #
 # Entry point
 # --------------------------------------------------------------------------- #
@@ -563,7 +549,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--recent-days", type=int, default=30, help="a branch touched within this many days is a CANDIDATE (default: 30)")
     parser.add_argument("--max-pr-commits", type=int, default=25, help="commits per open-PR branch inspected for shared history (default: 25)")
     parser.add_argument("--protect", action="append", default=None, metavar="BRANCH", help="branch never reported as stale (default: trunk, main, master)")
-    parser.add_argument("--format", choices=("table", "markdown", "csv", "json"), default="table")
+    parser.add_argument("--format", choices=("table", "markdown", "json"), default="table")
     parser.add_argument("--width", type=int, default=None, help="table width (default: terminal width)")
     parser.add_argument("--repo-path", default=None, help=f"path of the git clone (default: current directory, or {DEFAULT_REPO_PATH} when it is not one)")
     parser.add_argument("--token", default=None, help="GitHub token (else $GITHUB_TOKEN or gh)")
@@ -669,9 +655,6 @@ def main(argv: list[str] | None = None) -> int:
     if args.format == "json":
         json.dump([asdict(r) for r in rows], sys.stdout, indent=2)
         sys.stdout.write("\n")
-        return 0
-    if args.format == "csv":
-        render_csv(rows, sys.stdout)
         return 0
     if not rows:
         print("Nothing to report.")
