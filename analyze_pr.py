@@ -62,25 +62,18 @@ import urllib.request
 from dataclasses import dataclass, field, asdict
 from typing import Any
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-try:
-    from list_upstream_prs import (
-        DEFAULT_BOTS,
-        classify_contexts,
-        evaluate,
-        graphql,
-        join,
-        parse_yetus_comment,
-        requested_reviewers,
-        resolve_token,
-        summarise_reviews,
-        fetch,
-    )
-except ImportError:  # pragma: no cover - misplaced file
-    raise SystemExit(
-        "list_upstream_prs.py must sit next to this script "
-        "(it provides the GitHub and check-analysis helpers)."
-    )
+from list_upstream_prs import (
+    DEFAULT_BOTS,
+    classify_contexts,
+    evaluate,
+    graphql,
+    join,
+    parse_yetus_comment,
+    requested_reviewers,
+    resolve_token,
+    summarise_reviews,
+    fetch,
+)
 
 DEFAULT_REPO = "apache/hadoop"
 DEFAULT_AUTHOR = "joseluisll"

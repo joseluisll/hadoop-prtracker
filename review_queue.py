@@ -80,13 +80,9 @@ import textwrap
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-try:
-    import analyze_pr as core
-    from list_upstream_prs import (DEFAULT_BOTS, days_since, graphql, parse_yetus_comment,
-                                   resolve_token, summarise_reviews)
-except ImportError:  # pragma: no cover - misplaced file
-    raise SystemExit("analyze_pr.py and list_upstream_prs.py must sit next to this script.")
+import analyze_pr as core
+from list_upstream_prs import (DEFAULT_BOTS, days_since, graphql, parse_yetus_comment,
+                               resolve_token, summarise_reviews)
 
 ROOT = "(root)"
 NON_HUMAN = {b.lower() for b in DEFAULT_BOTS} | {"dependabot", "github-actions"}

@@ -49,14 +49,7 @@ import textwrap
 from dataclasses import dataclass, field, asdict
 from typing import Any, Iterable
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-try:
-    from list_upstream_prs import graphql, resolve_token
-except ImportError:  # pragma: no cover - misplaced file
-    raise SystemExit(
-        "list_upstream_prs.py must sit next to this script "
-        "(it provides the GitHub authentication helpers)."
-    )
+from list_upstream_prs import graphql, resolve_token
 
 DEFAULT_FORK = "joseluisll/hadoop"
 DEFAULT_UPSTREAM = "apache/hadoop"

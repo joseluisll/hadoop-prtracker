@@ -39,15 +39,12 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+import analyze_pr as core
+import fix_dependencies as fd
+import list_upstream_prs as lup
+import pr_graph
+
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, HERE)
-try:
-    import analyze_pr as core
-    import fix_dependencies as fd
-    import list_upstream_prs as lup
-    import pr_graph
-except ImportError as exc:  # pragma: no cover - misplaced file
-    raise SystemExit(f"pr_manager.py must sit next to the other PR scripts ({exc}).")
 
 try:
     from rich.text import Text

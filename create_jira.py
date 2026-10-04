@@ -39,14 +39,9 @@ import os
 import sys
 from typing import Any
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-try:
-    import analyze_pr as core
-    import fix_dependencies as fd
-    from list_upstream_prs import join, resolve_token
-except ImportError:  # pragma: no cover - misplaced file
-    raise SystemExit("analyze_pr.py, fix_dependencies.py and list_upstream_prs.py must "
-                     "sit next to this script.")
+import analyze_pr as core
+import fix_dependencies as fd
+from list_upstream_prs import join, resolve_token
 
 
 # --------------------------------------------------------------------------- #
