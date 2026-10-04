@@ -47,14 +47,12 @@ import textwrap
 from dataclasses import dataclass, field, asdict
 from typing import Any, Iterable
 
-from analyze_pr import DEFAULT_REPO_PATH, JIRA_IN_TEXT_RE, has_commit, is_ancestor
-from list_upstream_prs import graphql, resolve_token
+import analyze_pr as core
+from analyze_pr import has_commit, is_ancestor
+from list_upstream_prs import DEFAULT_FORK_OWNER, graphql, resolve_token
 
-DEFAULT_FORK = "joseluisll/hadoop"
-DEFAULT_UPSTREAM = "apache/hadoop"
 DEFAULT_FORK_REMOTE = "origin"
 DEFAULT_UPSTREAM_REMOTE = "upstream"
-DEFAULT_BASE_REF = "upstream/trunk"
 
 
 PR_SEARCH_QUERY = """
@@ -107,9 +105,9 @@ class Git:
         toplevel = self.run("rev-parse", "--show-toplevel", check=False).strip()
         if (self.run("rev-parse", "--is-inside-work-tree", check=False).strip() != "true"
                 or (not cwd and toplevel and os.path.samefile(toplevel, own_clone))):
-            if cwd or not os.path.isdir(DEFAULT_REPO_PATH):
+            if cwd or not os.path.isdir(core.DEFAULT_REPO_PATH):
                 raise SystemExit(f"{self.cwd} is not a git clone; pass --repo-path.")
-            self.cwd = DEFAULT_REPO_PATH
+            self.cwd = core.DEFAULT_REPO_PATH
         self.root = self.run("rev-parse", "--show-toplevel").strip() or self.cwd
 
     def run(self, *args: str, check: bool = True) -> str:
@@ -257,7 +255,7 @@ def gather_pull_requests(
 # Relation analysis
 # --------------------------------------------------------------------------- #
 def jira_key(text: str) -> str | None:
-    match = JIRA_IN_TEXT_RE.search(text or "")
+    match = core.JIRA_IN_TEXT_RE.search(text or "")
     return match.group(0).upper() if match else None
 
 
@@ -444,7 +442,7 @@ def classify(
         notes.append("history comparison was truncated, relation not fully verified")
         status = "CANDIDATE"
 
-    looks_upstream = bool(re.match(r"(branch-|rel/|gh-pages|feature-|trunk)", branch.name))
+    looks_upstream = bool(re.match(rf"(branch-|rel/|gh-pages|feature-|{core.BASE})", branch.name))
     if know_upstream and looks_upstream and not branch.upstream_sha:
         notes.append(f"no branch with this name in {upstream_name} any more")
     if branch.ahead and status != "ACTIVE":
@@ -533,13 +531,16 @@ def render_markdown(rows: list[Row], fork: str) -> str:
 # --------------------------------------------------------------------------- #
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
+        parents=[core.profile_parser(argv)],
     )
-    parser.add_argument("--fork", default=DEFAULT_FORK, help=f"fork, owner/name (default: {DEFAULT_FORK})")
-    parser.add_argument("--upstream", default=DEFAULT_UPSTREAM, help=f"upstream repository (default: {DEFAULT_UPSTREAM})")
+    fork = f"{DEFAULT_FORK_OWNER}/{core.DEFAULT_REPO.split('/')[1]}"
+    base_ref = f"{DEFAULT_UPSTREAM_REMOTE}/{core.BASE}"
+    parser.add_argument("--fork", default=fork, help=f"fork, owner/name (default: {fork})")
+    parser.add_argument("--upstream", default=core.DEFAULT_REPO, help=f"upstream repository (default: {core.DEFAULT_REPO})")
     parser.add_argument("--fork-remote", default=DEFAULT_FORK_REMOTE, help="git remote for the fork (default: origin)")
     parser.add_argument("--upstream-remote", default=DEFAULT_UPSTREAM_REMOTE, help="git remote for upstream (default: upstream)")
-    parser.add_argument("--base-ref", default=DEFAULT_BASE_REF, help=f"base branch to compare against (default: {DEFAULT_BASE_REF})")
+    parser.add_argument("--base-ref", default=base_ref, help=f"base branch to compare against (default: {base_ref})")
     parser.add_argument("--no-fetch", action="store_true", help="skip 'git fetch' and use the refs already present")
     parser.add_argument("--offline", action="store_true", help="no git network access at all (implies --no-fetch); upstream branches are read from local refs")
     parser.add_argument("--fetch-upstream-branches", action="store_true", help="fetch every upstream branch (bigger download) so branches sharing a name with one can be compared exactly instead of being left in doubt")
@@ -548,10 +549,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--only", default=None, help="comma separated statuses to keep, e.g. STALE or STALE,CANDIDATE")
     parser.add_argument("--recent-days", type=int, default=30, help="a branch touched within this many days is a CANDIDATE (default: 30)")
     parser.add_argument("--max-pr-commits", type=int, default=25, help="commits per open-PR branch inspected for shared history (default: 25)")
-    parser.add_argument("--protect", action="append", default=None, metavar="BRANCH", help="branch never reported as stale (default: trunk, main, master)")
+    parser.add_argument("--protect", action="append", default=None, metavar="BRANCH", help=f"branch never reported as stale (default: {core.BASE}, trunk, main, master)")
     parser.add_argument("--format", choices=("table", "markdown", "json"), default="table")
     parser.add_argument("--width", type=int, default=None, help="table width (default: terminal width)")
-    parser.add_argument("--repo-path", default=None, help=f"path of the git clone (default: current directory, or {DEFAULT_REPO_PATH} when it is not one)")
+    parser.add_argument("--repo-path", default=None, help=f"path of the git clone (default: current directory, or {core.DEFAULT_REPO_PATH} when it is not one)")
     parser.add_argument("--token", default=None, help="GitHub token (else $GITHUB_TOKEN or gh)")
     return parser.parse_args(argv)
 
@@ -563,7 +564,7 @@ def main(argv: list[str] | None = None) -> int:
         pass
 
     args = parse_args(argv)
-    protected = set(args.protect or ["trunk", "main", "master"])
+    protected = set(args.protect or [core.BASE, "trunk", "main", "master"])
     git = Git(args.repo_path)
 
     if not args.no_fetch and not args.offline:

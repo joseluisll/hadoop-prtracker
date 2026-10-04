@@ -59,11 +59,11 @@ import textwrap
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 from dataclasses import dataclass, field, asdict
 from typing import Any
 
 from list_upstream_prs import (
-    DEFAULT_BOTS,
     classify_contexts,
     evaluate,
     graphql,
@@ -75,24 +75,87 @@ from list_upstream_prs import (
     fetch,
 )
 
-DEFAULT_REPO = "apache/hadoop"
 DEFAULT_AUTHOR = "joseluisll"
 DEFAULT_JIRA = "https://issues.apache.org/jira"
 
+# The project the scripts work on, picked with --profile or $PRTRACKER_PROFILE.
+# bots: who posts the Yetus precommit comment; title_sep: after the JIRA key in a PR title;
+# jira_projects: keys recognised in text; jira_search: projects searched for fixes;
+# trees: top-level source tree -> its JIRA project (else "project");
+# test_trees: test package prefix -> its source tree;
+# qbt: the nightly build of the base branch qbt_jira.py reads, either one job
+# per JDK ("jobs", a regex) or one build with a stage per JDK ("staged", a job path).
+PROFILES: dict[str, dict[str, Any]] = {
+    "hadoop": {
+        "repo": "apache/hadoop", "base": "trunk", "bots": ("hadoop-yetus",),
+        "jira_projects": ("HADOOP", "HDFS", "YARN", "MAPREDUCE", "HDDS", "OZONE", "SUBMARINE"),
+        "project": "HADOOP", "jira_search": ("HADOOP", "HDFS", "YARN", "MAPREDUCE"),
+        "dev_list": "common-dev@hadoop.apache.org", "title_sep": ".",
+        "trees": {"hadoop-hdfs-project": "HDFS", "hadoop-yarn-project": "YARN",
+                  "hadoop-mapreduce-project": "MAPREDUCE"},
+        "test_trees": (("hadoop.hdfs", "hadoop-hdfs-project"), ("hadoop.yarn", "hadoop-yarn-project"),
+                       ("hadoop.mapred", "hadoop-mapreduce-project")),
+        "clone": "hadoop", "clone_env": "HADOOP_REPO_PATH",
+        "qbt": {"jenkins": "https://ci-hadoop.apache.org", "name": "nightly trunk build (qbt)",
+                "jobs": r"^hadoop-qbt-trunk-java\d+-linux-x86_64$"},
+    },
+    "hbase": {
+        # Its precommit runs Yetus in GitHub Actions: no PR comment, the reports
+        # are run artifacts, read as comments of ACTIONS_YETUS_BOT (yetus_artifacts).
+        "repo": "apache/hbase", "base": "master", "bots": ("yetus-actions",), "title_sep": "",
+        "jira_projects": ("HBASE",), "project": "HBASE", "jira_search": ("HBASE",),
+        "dev_list": "dev@hbase.apache.org", "trees": {}, "test_trees": (),
+        "clone": "hbase", "clone_env": "HBASE_REPO_PATH", "yetus_artifacts": True,
+        "qbt": {"jenkins": "https://ci-hbase.apache.org", "name": "nightly master build (HBase Nightly)",
+                "staged": "HBase Nightly/master"},
+    },
+}
 
-def default_repo_path() -> str:
-    """The Hadoop clone: $HADOOP_REPO_PATH, else C:\\dev\\hadoop on Windows and ~/code/hadoop elsewhere."""
-    configured = os.environ.get("HADOOP_REPO_PATH")
+
+def default_repo_path(profile: dict[str, Any]) -> str:
+    """The clone: $<clone_env>, else C:\\dev\\<clone> on Windows and ~/code/<clone> elsewhere."""
+    configured = os.environ.get(profile["clone_env"])
     if configured:
         return os.path.expanduser(configured)
-    return r"C:\dev\hadoop" if os.name == "nt" else os.path.expanduser("~/code/hadoop")
+    return rf"C:\dev\{profile['clone']}" if os.name == "nt" else os.path.expanduser(f"~/code/{profile['clone']}")
 
 
-DEFAULT_REPO_PATH = default_repo_path()
+def use_profile(name: str) -> None:
+    """Point the module defaults at a project. Scripts started from here inherit it."""
+    global PROFILE, DEFAULT_REPO, BASE, DEFAULT_BOTS, DEFAULT_PROJECT, JIRA_PROJECT_OF_TREE
+    global DEFAULT_REPO_PATH, JIRA_IN_TEXT_RE, REF_IN_TEXT_RE, YETUS_MODULE_RE, YETUS_EXTANT_RE
+    if name not in PROFILES:
+        raise SystemExit(f"unknown profile '{name}' (known: {', '.join(sorted(PROFILES))})")
+    PROFILE = PROFILES[name]
+    os.environ["PRTRACKER_PROFILE"] = name
+    DEFAULT_REPO, BASE, DEFAULT_BOTS = PROFILE["repo"], PROFILE["base"], PROFILE["bots"]
+    DEFAULT_PROJECT, JIRA_PROJECT_OF_TREE = PROFILE["project"], PROFILE["trees"]
+    DEFAULT_REPO_PATH = default_repo_path(PROFILE)
+    keys = "|".join(PROFILE["jira_projects"])
+    JIRA_IN_TEXT_RE = re.compile(rf"\b({keys})-(\d+)\b", re.I)
+    REF_IN_TEXT_RE = re.compile(
+        r"https?://github\.com/([\w.-]+/[\w.-]+)/pull/(\d+)"
+        r"|(?<![\w/])#(\d+)\b"
+        rf"|\b(?:{keys})-\d+\b",
+        re.I,
+    )
+    YETUS_MODULE_RE = re.compile(rf"^\s*([\w.-]+(?:/[\w.-]+)*)\s+in\s+(?:{BASE}|the\s+patch)\b")
+    # '<module> in trunk has 12 extant spotbugs warnings.' of the branch phase.
+    YETUS_EXTANT_RE = re.compile(rf"([\w.-]+(?:/[\w.-]+)*)\s+in\s+{BASE}\s+has\s+(\d+)\s+extant")
 
-JIRA_IN_TEXT_RE = re.compile(
-    r"\b(HADOOP|HDFS|YARN|MAPREDUCE|HDDS|OZONE|SUBMARINE)-(\d+)\b", re.I
-)
+
+def profile_parser(argv: list[str] | None) -> argparse.ArgumentParser:
+    """Apply --profile from argv before a script's parser reads the defaults; the
+    returned parser goes into that script's parents= so --profile is accepted."""
+    parent = argparse.ArgumentParser(add_help=False)
+    parent.add_argument("--profile", choices=sorted(PROFILES),
+                        default=os.environ.get("PRTRACKER_PROFILE", "hadoop"),
+                        help="project to work on (default: $PRTRACKER_PROFILE, else hadoop)")
+    use_profile(parent.parse_known_args(argv)[0].profile)
+    return parent
+
+
+use_profile(os.environ.get("PRTRACKER_PROFILE", "hadoop"))
 
 JIRA_FIELDS = (
     "summary,status,resolution,assignee,reporter,priority,issuetype,components,"
@@ -117,12 +180,6 @@ DEP_PHRASE_RE = re.compile(
 )
 # A list introduced by 'merge first:' carries its references on the next lines.
 LIST_ITEM_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
-REF_IN_TEXT_RE = re.compile(
-    r"https?://github\.com/([\w.-]+/[\w.-]+)/pull/(\d+)"
-    r"|(?<![\w/])#(\d+)\b"
-    r"|\b(?:HADOOP|HDFS|YARN|MAPREDUCE|HDDS|OZONE|SUBMARINE)-\d+\b",
-    re.I,
-)
 # 'nothing in HADOOP-19972 depends on it' is not a dependency.
 NEGATION_RE = re.compile(
     r"\b(?:no|not|nothing|none|never|neither|nor|without|n't|does\s+not|do\s+not|"
@@ -132,7 +189,7 @@ NEGATION_RE = re.compile(
 
 # What a -1 from a given Yetus subsystem means in practice.
 YETUS_ADVICE = {
-    "patch": "the patch no longer applies: rebase onto the latest trunk and force-push",
+    "patch": "the patch no longer applies: rebase onto the latest base branch and force-push",
     "mvninstall": "the build fails: reproduce with 'mvn -DskipTests install' on the touched modules",
     "compile": "compilation fails on one of the supported JDKs: check both JDK 17 and JDK 21",
     "javac": "new javac warnings were introduced: remove them or justify each one",
@@ -250,7 +307,7 @@ SYMBOL_PATTERNS = (
 SYMBOL_STOPWORDS = {
     "getinstance", "tostring", "hashcode", "equals", "builder", "create", "close",
     "value", "getname", "setname", "start", "stop", "getconf", "setconf", "run",
-    "test", "setup", "teardown", "initialize", "main", "apache", "hadoop",
+    "test", "setup", "teardown", "initialize", "main", "apache", "hadoop", "hbase",
 }
 
 
@@ -361,7 +418,8 @@ def fetch_jira(base: str, key: str) -> Jira:
 def fetch_pr(repo: str, number: int, token: str | None) -> dict[str, Any] | None:
     owner, _, name = repo.partition("/")
     data = graphql(PR_QUERY, {"owner": owner, "name": name, "number": number}, token)
-    return ((data.get("repository") or {}) or {}).get("pullRequest")
+    pr = ((data.get("repository") or {}) or {}).get("pullRequest")
+    return add_actions_yetus(pr, repo, token, YETUS_COMMITS)
 
 
 def find_pr_for_jira(repo: str, key: str, token: str | None) -> tuple[int | None, list[dict]]:
@@ -515,7 +573,7 @@ def symbol_in_base(repo_path: str | None, base_ref: str | None, symbol: str,
 def resolve_base_ref(repo_path: str | None) -> str | None:
     if not repo_path:
         return None
-    for ref in ("upstream/trunk", "origin/trunk", "trunk"):
+    for ref in (f"upstream/{BASE}", f"origin/{BASE}", BASE):
         if git_run(repo_path, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}")[0] == 0:
             return ref
     return None
@@ -587,7 +645,6 @@ query($owner: String!, $name: String!, $number: Int!) {
 """
 
 YETUS_ROW_RE = re.compile(r"^\|\s*-1\b")
-YETUS_MODULE_RE = re.compile(r"^\s*([\w.-]+(?:/[\w.-]+)*)\s+in\s+(?:trunk|the\s+patch)\b")
 YETUS_TESTS_RE = re.compile(r"^\|\s*(Failed junit tests|Timed out junit tests|"
                             r"Failed junit5 tests)?\s*\|\s*([\w.$]+)\s*\|\s*$")
 CHECK_WORDS = {
@@ -610,6 +667,15 @@ GOAL_FAILURE_RE = re.compile(r"Failed to execute goal ([\w.-]+):([\w.-]+):[\w.-]
 TEST_PLUGINS = ("maven-surefire-plugin", "maven-failsafe-plugin")
 ACTIONS_FAILED_RUNS = 6
 CACHE_DIR = os.path.join(tempfile.gettempdir(), "analyze_pr_cache")
+# Where the Yetus artifacts of an Actions precommit (hbase profile) are downloaded.
+YETUS_ZIP_DIR = os.path.join(tempfile.gettempdir(), "prtracker-yetus")
+# The author given to the Yetus reports read from those artifacts, and the
+# head commits read for one PR (a listing of many reads only the latest).
+ACTIONS_YETUS_BOT = "yetus-actions"
+YETUS_COMMITS = 3
+# A passing job's artifact larger than this is not downloaded (a unit wave
+# keeps every test's output: 60 MB); its row is written as a plain +1.
+YETUS_ZIP_PASSED_MAX = 5_000_000
 
 # (head repo, branch) -> the completed Actions runs: when, workflow, and
 # 'clean' when the run is green or its failures were all read.
@@ -676,6 +742,116 @@ def build_log_failures(url: str, token: str | None = None) -> dict[str, list] | 
         data = http_get(url, token)
         return log_failures(data.decode("utf-8", "replace")) if data else None
     return disk_cached(f"log-{url}", compute)
+
+
+# A row of a Yetus console report (console.txt, console-report.txt):
+# '|  -1  |  spotbugs  |  1m 36s   | hbase-server generated 6 new', and the
+# rows below it with empty vote, subsystem and runtime that carry on its comment.
+CONSOLE_ROW_RE = re.compile(r"^\|\s*([+-]?\d)\s*\|\s*(\S*)\s*\|[^|]*\|(.*)$")
+CONSOLE_MORE_RE = re.compile(r"^\|\s*\|\s*\|\s*\|(.*)$")
+
+
+def console_rows(text: str) -> list[tuple[str, str, str]]:
+    """(vote, subsystem, comment) of every vote row of a Yetus console report."""
+    rows: list[tuple[str, str, str]] = []
+    vote, subsystem, parts = "", "", []
+
+    def flush() -> None:
+        if subsystem:
+            rows.append((vote, subsystem, " ".join("".join(parts).split())))
+    for line in text.splitlines():
+        row, more = CONSOLE_ROW_RE.match(line), CONSOLE_MORE_RE.match(line)
+        if row:
+            flush()
+            vote, subsystem, parts = row.group(1), row.group(2), [row.group(3)]
+        elif more and subsystem:
+            parts.append(more.group(1))  # a long comment is cut mid-word: joined as is
+        else:
+            flush()
+            subsystem, parts = "", []
+    flush()
+    return rows
+
+
+def yetus_artifact(url: str, artifact_id: int, token: str | None) -> dict[str, Any] | None:
+    """console.txt and the tests failed in the unit logs of a Yetus output artifact."""
+    def compute() -> dict[str, Any] | None:
+        data = http_get(url, token)
+        if not data:
+            return None
+        os.makedirs(YETUS_ZIP_DIR, exist_ok=True)
+        path = os.path.join(YETUS_ZIP_DIR, f"{artifact_id}.zip")
+        with open(path, "wb") as handle:
+            handle.write(data)
+        with zipfile.ZipFile(path) as archive:
+            def read(name: str) -> str:
+                return archive.read(name).decode("utf-8", "replace")
+            names = archive.namelist()
+            console = next((read(n) for n in names if os.path.basename(n) == "console.txt"), "")
+            tests = sorted({t for n in names if re.match(r"patch-unit-.+\.txt$", os.path.basename(n))
+                            for t in log_failures(read(n))["tests"]})
+        return {"console": console, "tests": tests}
+    return disk_cached(f"yetus-artifact-{artifact_id}", compute)
+
+
+@functools.lru_cache(None)
+def actions_yetus_comments(repo: str, head_repo: str, branch: str, token: str | None,
+                           commits: int = 1) -> tuple[dict[str, Any], ...]:
+    """The Yetus reports a GitHub Actions precommit leaves as run artifacts
+    (HBase: the Yetus General Check, JDK17 Compile and Unit Check workflows),
+    one comment per head commit, newest first, in the hadoop-yetus format, so
+    whatever reads those comments reads these too."""
+    if not (token and head_repo and branch):
+        return ()
+    listing = rest_json(f"repos/{repo}/actions/runs?event=pull_request&per_page=50&branch="
+                        f"{urllib.parse.quote(branch)}", token)
+    by_commit: dict[str, list[dict[str, Any]]] = {}
+    for run in listing.get("workflow_runs") or []:
+        if run.get("status") == "completed" and "yetus" in (run.get("name") or "").lower() \
+                and ((run.get("head_repository") or {}).get("full_name") or "") == head_repo:
+            by_commit.setdefault(run["head_sha"], []).append(run)
+    comments = []
+    for sha, runs in list(by_commit.items())[:commits]:
+        rows, tests = [], []
+        for run in runs:
+            # A green run passed every job; a red one says which jobs failed.
+            failed = set() if run.get("conclusion") == "success" else {
+                j.get("name") for j in rest_json(f"repos/{repo}/actions/runs/{run['id']}/jobs",
+                                                 token).get("jobs") or []
+                if j.get("conclusion") != "success"}
+            for artifact in rest_json(f"repos/{repo}/actions/runs/{run['id']}/artifacts",
+                                      token).get("artifacts") or []:
+                job_failed = any(job and job in artifact["name"] for job in failed)
+                if not job_failed and artifact.get("size_in_bytes", 0) > YETUS_ZIP_PASSED_MAX:
+                    # ponytail: only the unit waves are this big, so the row says unit.
+                    rows.append(("+1", "unit", f"{artifact['name']} passed"))
+                    continue
+                report = yetus_artifact(artifact["archive_download_url"], artifact["id"], token)
+                if report:
+                    rows += console_rows(report["console"])
+                    tests += report["tests"]
+        if not rows:
+            continue
+        overall = "-1" if any(vote == "-1" for vote, _, _ in rows) else "+1"
+        body = [f"**{overall} overall** (Yetus reports of the GitHub Actions runs of {sha[:10]})",
+                "", "| Vote | Subsystem | Runtime | Logfile | Comment |", "|---|---|---|---|---|"]
+        body += [f"| {vote} | {subsystem} |  |  | {comment} |" for vote, subsystem, comment in rows]
+        body += ["", "| Reason | Tests |", "|---|---|"]
+        body += [f"| Failed junit tests | {test} |" for test in dict.fromkeys(tests)]
+        comments.append({"author": {"login": ACTIONS_YETUS_BOT}, "body": "\n".join(body),
+                         "createdAt": max(r.get("updated_at") or "" for r in runs)})
+    return tuple(comments)
+
+
+def add_actions_yetus(pr: dict[str, Any], repo: str, token: str | None,
+                      commits: int = 1) -> dict[str, Any]:
+    """With a profile whose precommit posts no Yetus comment (hbase), add the
+    reports of its Actions artifacts to the PR's comments."""
+    if pr and PROFILE.get("yetus_artifacts"):
+        head = ((pr.get("headRepository") or {}) or {}).get("nameWithOwner") or ""
+        extra = actions_yetus_comments(repo, head, pr.get("headRefName") or "", token, commits)
+        pr["comments"] = {"nodes": [*((pr.get("comments") or {}).get("nodes") or []), *extra]}
+    return pr
 
 
 def actions_failures(head_repo: str, branch: str, token: str | None) -> list[dict[str, Any]]:
@@ -807,7 +983,7 @@ def parse_ci_failures(pr: dict[str, Any], token: str | None = None) -> list[dict
                 unit_log = (when, report_url)
             if subsystem in ("patch", "unit") or "does not apply" in note:
                 continue  # unit failures are recorded test by test above
-            from_trunk = "/branch-" in report_url or " in trunk" in note
+            from_trunk = "/branch-" in report_url or f" in {BASE}" in note
             if not from_trunk:
                 continue  # introduced by this patch: the PR has to fix it itself
             module = YETUS_MODULE_RE.match(note)
@@ -816,7 +992,7 @@ def parse_ci_failures(pr: dict[str, Any], token: str | None = None) -> list[dict
                 module_path = ""  # 'root has 94 extant warnings' points nowhere
             record((subsystem, module_path or note), when, current, "precommit",
                    subsystem=subsystem, module=module_path, report=report_url,
-                   detail=f"{subsystem} on {module_path or 'the build'} (trunk)")
+                   detail=f"{subsystem} on {module_path or 'the build'} ({BASE})")
 
     # 'root in the patch failed' can hide a plugin that broke on some module
     # (a Jasmine run, an enforcer rule): the newest unit log names it.
@@ -911,7 +1087,7 @@ def fetch_ci_failures(repo: str, number: int, token: str | None) -> list[dict[st
         pr = ((data.get("repository") or {}) or {}).get("pullRequest") or {}
     except SystemExit:
         pr = {}
-    return parse_ci_failures(pr, token) if pr else []
+    return parse_ci_failures(add_actions_yetus(pr, repo, token, YETUS_COMMITS), token) if pr else []
 
 
 def _main_code(path: str) -> bool:
@@ -921,9 +1097,7 @@ def _main_code(path: str) -> bool:
 def _project_of_test(test: str) -> str:
     """Top-level source tree of a test, from its package."""
     package = test.replace("org.apache.", "")
-    for prefix, project in (("hadoop.hdfs", "hadoop-hdfs-project"),
-                            ("hadoop.yarn", "hadoop-yarn-project"),
-                            ("hadoop.mapred", "hadoop-mapreduce-project")):
+    for prefix, project in PROFILE["test_trees"]:
         if package.startswith(prefix):
             return project
     return ""
@@ -1024,7 +1198,7 @@ def ci_fix_match(failures: list[dict[str, Any]], paths: list[str],
             if any(p.endswith(source) for p in paths):
                 short = cls.split("$")[0].rsplit(".", 1)[-1]
                 kinds = join(types, limit=2)
-                offer("strong", f"it changes {short}, which carries the trunk {subsystem} "
+                offer("strong", f"it changes {short}, which carries the {BASE} {subsystem} "
                                 f"warning" + (f" {kinds}" if kinds else "")
                                 + f" that turns {red} red{when}",
                       short.lower() in lowered or subsystem in lowered)
@@ -1037,17 +1211,17 @@ def ci_fix_match(failures: list[dict[str, Any]], paths: list[str],
         leaf = module.rsplit("/", 1)[-1]
         words = CHECK_WORDS.get(subsystem, (subsystem,))
         if in_module and any(word in lowered for word in words):
-            offer("strong", f"it names {subsystem} and changes {leaf}, where trunk's "
+            offer("strong", f"it names {subsystem} and changes {leaf}, where {BASE}'s "
                             f"{subsystem} -1 turns {red} red{when}", named=True)
         if subsystem == "spotbugs":
             for p in paths:
                 if os.path.basename(p) == "findbugs-exclude.xml":
                     root = p.split("/dev-support/")[0]
                     if module.startswith(root + "/") or module == root:
-                        offer("medium", f"it edits {p}, which covers {leaf}, where trunk's "
+                        offer("medium", f"it edits {p}, which covers {leaf}, where {BASE}'s "
                                         f"spotbugs -1 turns {red} red{when}")
         if in_module:
-            offer("weak", f"it changes main code of {leaf}, where trunk's {subsystem} -1 "
+            offer("weak", f"it changes main code of {leaf}, where {BASE}'s {subsystem} -1 "
                           f"turns {red} red{when}")
     return best
 
@@ -1131,6 +1305,7 @@ query($q: String!) {
     nodes {
       ... on PullRequest {
         number title url body state mergedAt author { login }
+        headRefName headRepository { nameWithOwner }
         files(first: 100) { nodes { path } }
         comments(last: 20) { nodes { author { login } body createdAt } }
       }
@@ -1143,15 +1318,11 @@ query($q: String!) {
 YETUS_SPOTBUGS_DELTA_RE = re.compile(
     r"([\w.-]+(?:/[\w.-]+)*)\s+generated\s+(\d+)\s+new\s+\+\s+(\d+)\s+unchanged\s+-\s+"
     r"(\d+)\s+fixed\s+=\s+(\d+)\s+total\s+\(was\s+(\d+)\)")
-# '<module> in trunk has 12 extant spotbugs warnings.' of the branch phase.
-YETUS_EXTANT_RE = re.compile(r"([\w.-]+(?:/[\w.-]+)*)\s+in\s+trunk\s+has\s+(\d+)\s+extant")
 # '<module> in the patch passed.' / '... failed.' of a unit row.
 YETUS_UNIT_RESULT_RE = re.compile(r"([\w.-]+)\s+in\s+the\s+patch\s+(passed|failed)")
 UNEXPLAINED_LIMIT = 10
-JIRA_PROJECT_OF_TREE = {"hadoop-hdfs-project": "HDFS", "hadoop-yarn-project": "YARN",
-                        "hadoop-mapreduce-project": "MAPREDUCE"}
 MODULE_NOISE = {"hadoop", "project", "server", "client", "applications", "webapp", "common",
-                "yarn", "hdfs", "mapreduce"}
+                "yarn", "hdfs", "mapreduce", "hbase"}
 
 
 def failure_words(failure: dict[str, Any]) -> list[list[str]]:
@@ -1173,38 +1344,38 @@ def new_jira_summary(failure: dict[str, Any]) -> str:
     """What a JIRA for a failure nobody tracks could be called."""
     if failure.get("test"):
         simple = failure["test"].rsplit(".", 1)[-1]
-        project = JIRA_PROJECT_OF_TREE.get(_project_of_test(failure["test"]), "HADOOP")
-        return f"{project}: {simple} fails on trunk"
+        project = JIRA_PROJECT_OF_TREE.get(_project_of_test(failure["test"]), DEFAULT_PROJECT)
+        return f"{project}: {simple} fails on {BASE}"
     if failure.get("project"):
         name = failure["project"]
         project = next((v for k, v in JIRA_PROJECT_OF_TREE.items()
-                        if name.startswith(k.replace("-project", ""))), "HADOOP")
+                        if name.startswith(k.replace("-project", ""))), DEFAULT_PROJECT)
         return f"{project}: {failure.get('plugin')} fails on {name}"
     module = failure.get("module") or ""
-    project = JIRA_PROJECT_OF_TREE.get(module.split("/", 1)[0], "HADOOP")
+    project = JIRA_PROJECT_OF_TREE.get(module.split("/", 1)[0], DEFAULT_PROJECT)
     classes = failure.get("classes") or {}
     if len(classes) == 1:
         cls, types = next(iter(classes.items()))
         short = cls.split("$")[0].rsplit(".", 1)[-1]
         return f"{project}: Fix SpotBugs {join(types, limit=2)} in {short}"
     if classes and module:
-        return f"{project}: Fix the trunk SpotBugs warnings in {module.rsplit('/', 1)[-1]}"
+        return f"{project}: Fix the {BASE} SpotBugs warnings in {module.rsplit('/', 1)[-1]}"
     if module:
-        return f"{project}: Fix the trunk {failure['subsystem']} warnings in {module.rsplit('/', 1)[-1]}"
+        return f"{project}: Fix the {BASE} {failure['subsystem']} warnings in {module.rsplit('/', 1)[-1]}"
     return f"{project}: {failure.get('detail')}"
 
 
 def search_fixer_prs(repo: str, words: list[str], token: str | None) -> list[dict[str, Any]]:
-    return _search_prs(f"repo:{repo} is:pr " + " ".join(f'"{w}"' for w in words), token)
+    return _search_prs(repo, f"repo:{repo} is:pr " + " ".join(f'"{w}"' for w in words), token)
 
 
 @functools.lru_cache(None)
-def _search_prs(query: str, token: str | None) -> list[dict[str, Any]]:
+def _search_prs(repo: str, query: str, token: str | None) -> list[dict[str, Any]]:
     try:
         data = graphql(FIXER_SEARCH_QUERY, {"q": query}, token)
     except SystemExit:
         return []
-    return [n for n in (data["search"]["nodes"] or []) if n]
+    return [add_actions_yetus(n, repo, token) for n in (data["search"]["nodes"] or []) if n]
 
 
 def search_jira_issues(jira_base: str, words: list[str], since: str = "") -> list[dict[str, Any]]:
@@ -1220,7 +1391,7 @@ def _search_jira(jira_base: str, words: tuple[str, ...], since: str) -> list[dic
     # Summary and description only: every issue whose precommit a test
     # broke quotes it in a Yetus comment, and 'text ~' would match those.
     phrase = f'"\\"{text}\\""' if len(words) == 1 else f'"{text}"'
-    jql = (f"project in (HADOOP, HDFS, YARN, MAPREDUCE) AND "
+    jql = (f"project in ({', '.join(PROFILE['jira_search'])}) AND "
            f"(summary ~ {phrase} OR description ~ {phrase}){live} ORDER BY updated DESC")
     data = jira_get(jira_base, "search", {
         "jql": jql, "maxResults": "8",
@@ -1330,7 +1501,7 @@ def yetus_verdict(failure: dict[str, Any], reports: list[dict[str, Any]]) -> tup
                 if extant:
                     # Yetus prints the delta only when the count changes.
                     return "refuted", (f"it fixes none: {run} found the {extant} warning(s) "
-                                       f"of {leaf} in trunk and no change in the patch")
+                                       f"of {leaf} in {BASE} and no change in the patch")
                 continue
             quoted = f"{run} on {leaf}: '{delta['text']}'"
             if delta["fixed"] == 0:
@@ -1676,7 +1847,7 @@ def collect_dependencies(
     # A PR opened against another branch than the base of the repository is
     # stacked by construction.
     base = pr.get("baseRefName") or ""
-    if base and base not in ("trunk", "main", "master") and not base.startswith("branch-"):
+    if base and base not in (BASE, "trunk", "main", "master") and not base.startswith("branch-"):
         for peer in peers:
             if peer.get("headRefName") == base:
                 add_dependency(
@@ -2025,7 +2196,7 @@ def analyse(
                 )
             else:
                 actions.append(
-                    f"open a PR against trunk whose title is '{jira.key}. {jira.title}'"
+                    f"open a PR against {BASE} whose title is '{jira.key}{PROFILE['title_sep']} {jira.title}'"
                 )
                 actions.append(
                     "assign the JIRA to yourself and move it to Patch Available once the PR is up"
@@ -2094,7 +2265,8 @@ def analyse(
     waiting_on = unanswered_question(pr)
     threads = open_review_threads(pr)
     gaps = body_gaps(pr.get("body", ""))
-    title_ok = bool(jira and re.match(rf"^{re.escape(jira.key)}\.\s+\S", pr.get("title", ""), re.I))
+    sep = PROFILE["title_sep"]
+    title_ok = bool(jira and re.match(rf"^{re.escape(jira.key + sep)}\s+\S", pr.get("title", ""), re.I))
 
     if jira and jira.found:
         notes.append(
@@ -2114,7 +2286,7 @@ def analyse(
     for gap in gaps:
         notes.append(gap)
     if not title_ok and jira:
-        notes.append("the PR title does not follow the 'JIRA-ID. Summary.' convention")
+        notes.append(f"the PR title does not follow the 'JIRA-ID{PROFILE['title_sep']} Summary' convention")
 
     # ----- dependencies on other pull requests ------------------------------ #
     deps = deps or {"depends_on": [], "blocks": [], "overlaps": []}
@@ -2143,7 +2315,7 @@ def analyse(
         if entry["state"] == "MERGED":
             notes.append(
                 f"{entry['ref']}, which this PR was built on, is already merged - "
-                "a rebase on trunk should drop its commits"
+                f"a rebase on {BASE} should drop its commits"
             )
     if blocked_by_me:
         notes.append(
@@ -2164,7 +2336,7 @@ def analyse(
         where = " and ".join(item.get("seen_in") or ["CI"])
         for fix in item.get("prs", [])[:2]:
             if fix["state"] == "MERGED":
-                actions.append(f"rebase on trunk: #{fix['number']} (merged {fix['merged']}) "
+                actions.append(f"rebase on {BASE}: #{fix['number']} (merged {fix['merged']}) "
                                f"fixes {item['failure']} ({where})")
             else:
                 notes.append(f"{item['failure']} ({where}) is fixed by #{fix['number']} of "
@@ -2197,7 +2369,7 @@ def analyse(
         actions.append(
             f"get {first['ref']} merged first"
             + (f" ({first['title']})" if first.get("title") else "")
-            + ", then rebase this PR on trunk and force-push"
+            + f", then rebase this PR on {BASE} and force-push"
         )
         for entry in solid[1:]:
             actions.append(f"the same applies to {entry['ref']}")
@@ -2224,12 +2396,12 @@ def analyse(
     for entry in satisfied:
         if entry["state"] == "MERGED":
             actions.append(
-                f"{entry['ref']} is merged: rebase on trunk so only this change is left in the diff"
+                f"{entry['ref']} is merged: rebase on {BASE} so only this change is left in the diff"
             )
     if pr.get("isDraft"):
         actions.append("take the PR out of draft so reviewers and committers can act on it")
     if pr.get("mergeable") == "CONFLICTING":
-        actions.append("rebase onto the latest trunk to clear the merge conflicts, then force-push")
+        actions.append(f"rebase onto the latest {BASE} to clear the merge conflicts, then force-push")
 
     if yetus and yetus.needs_rebase:
         actions.append(YETUS_ADVICE["patch"])
@@ -2256,7 +2428,7 @@ def analyse(
         )
         break
     if not title_ok and jira:
-        actions.append(f"rename the PR to '{jira.key}. {jira.title}'")
+        actions.append(f"rename the PR to '{jira.key}{PROFILE['title_sep']} {jira.title}'")
 
     # GitHub keeps blocking the merge while the review decision is
     # CHANGES_REQUESTED, even when no current review carries that state.
@@ -2300,7 +2472,7 @@ def analyse(
             )
             actions.append(
                 "if it stays quiet for a week, send a short reminder to "
-                "common-dev@hadoop.apache.org with the PR link"
+                f"{PROFILE['dev_list']} with the PR link"
             )
 
     if jira and jira.found:
@@ -2316,11 +2488,11 @@ def analyse(
         if "pull-request-available" not in jira.labels:
             actions.append(f"link the PR in {jira.key} (the ASF bot then adds pull-request-available)")
     elif jira is None:
-        actions.append("file a JIRA issue and rename the PR to 'JIRA-ID. Summary.'")
+        actions.append(f"file a JIRA issue and rename the PR to 'JIRA-ID{PROFILE['title_sep']} Summary'")
 
     idle = days_since(pr.get("updatedAt"))
     if idle is not None and idle >= stale_days and not actions:
-        actions.append("rebase on trunk to trigger a fresh precommit run and bring the PR back up the queue")
+        actions.append(f"rebase on {BASE} to trigger a fresh precommit run and bring the PR back up the queue")
     if not actions:
         actions.append("nothing blocking found: keep an eye on the checks and wait for a committer")
 
@@ -2403,7 +2575,8 @@ def render_markdown(reports: list[Report]) -> str:
 # --------------------------------------------------------------------------- #
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
+        parents=[profile_parser(argv)],
     )
     parser.add_argument("target", nargs="*", help="PR number(s) and/or JIRA id(s)")
     parser.add_argument(
@@ -2439,7 +2612,7 @@ def resolve_target(
 
     if not JIRA_IN_TEXT_RE.fullmatch(target):
         raise SystemExit(
-            f"'{target}' is neither a PR number nor a JIRA id such as HADOOP-19987."
+            f"'{target}' is neither a PR number nor a JIRA id such as {DEFAULT_PROJECT}-1234."
         )
     key = target.upper()
     jira = fetch_jira(jira_base, key)

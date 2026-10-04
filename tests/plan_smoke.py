@@ -1,5 +1,6 @@
 """Offline smoke test of fix_dependencies.plan_all: prints the plan for three fake PRs."""
 import os, sys; sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+os.environ.pop("PRTRACKER_PROFILE", None)  # the fixtures are hadoop ones
 import analyze_pr as core, fix_dependencies as fd
 fd.viewer_login = lambda t: "me"
 J = lambda key, links=(): core.Jira(key=key, found=True, links=list(links)) if 'found' in core.Jira.__dataclass_fields__ else None

@@ -48,10 +48,7 @@ GRAPHQL_URL = "https://api.github.com/graphql"
 RETRIES = 3
 RETRY_WAIT = 2.0  # seconds, multiplied by the attempt number
 
-DEFAULT_UPSTREAM = "apache/hadoop"
 DEFAULT_FORK_OWNER = "joseluisll"
-DEFAULT_BASE_BRANCH = "trunk"
-DEFAULT_BOTS = ("hadoop-yetus",)
 
 # Contexts whose name matches this are the ASF Jenkins / Yetus precommit job
 # rather than a GitHub Actions workflow.
@@ -214,7 +211,8 @@ def fetch_pull_requests(
         if not result["pageInfo"]["hasNextPage"]:
             break
         cursor = result["pageInfo"]["endCursor"]
-    return nodes
+    import analyze_pr as core  # it imports this module
+    return [core.add_actions_yetus(pr, upstream, token) for pr in nodes]
 
 
 # --------------------------------------------------------------------------- #
@@ -571,14 +569,17 @@ def render_markdown(rows: list[PullRequestRow]) -> str:
 # Entry point
 # --------------------------------------------------------------------------- #
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    import analyze_pr as core  # it imports this module: the project defaults live there
+
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        parents=[core.profile_parser(argv)],
     )
     parser.add_argument(
         "--upstream",
-        default=DEFAULT_UPSTREAM,
-        help=f"upstream repository, owner/name (default: {DEFAULT_UPSTREAM})",
+        default=core.DEFAULT_REPO,
+        help=f"upstream repository, owner/name (default: {core.DEFAULT_REPO})",
     )
     parser.add_argument(
         "--fork-owner",
@@ -592,8 +593,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--base",
-        default=DEFAULT_BASE_BRANCH,
-        help=f"target branch upstream, '*' for any (default: {DEFAULT_BASE_BRANCH})",
+        default=core.BASE,
+        help=f"target branch upstream, '*' for any (default: {core.BASE})",
     )
     parser.add_argument(
         "--include-drafts",
@@ -616,7 +617,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="append",
         default=None,
         metavar="LOGIN",
-        help=f"login of the precommit bot (default: {', '.join(DEFAULT_BOTS)})",
+        help=f"login of the precommit bot (default: {', '.join(core.DEFAULT_BOTS)})",
     )
     parser.add_argument(
         "--format",
@@ -631,7 +632,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="table width in columns (default: terminal width)",
     )
     parser.add_argument("--token", default=None, help="GitHub token (else $GITHUB_TOKEN or gh)")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    args.bot = args.bot or list(core.DEFAULT_BOTS)
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -643,7 +646,7 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parse_args(argv)
     author = args.author or args.fork_owner
-    bots = args.bot or list(DEFAULT_BOTS)
+    bots = args.bot
     token = resolve_token(args.token)
 
     pulls = fetch_pull_requests(args.upstream, author, token)

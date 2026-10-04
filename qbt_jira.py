@@ -14,6 +14,11 @@ before it, and turns what they show into JIRA candidates:
 * trunk spotbugs warnings, grouped by the module whose source has them;
 * with --include-lint, a tree-wide -1 such as xml or pathlen.
 
+With --profile hbase it reads the "HBase Nightly" build of master on
+ci-hbase.apache.org instead: one build whose Yetus stages (general,
+jdk17-hadoop3, ...) are read like the per-JDK jobs above. Its unit run covers
+the whole tree, so it gives no per-module plugin goal candidates.
+
 The output starts with every candidate ranked by the open PRs it would help:
 those whose latest precommit has a -1 that fixing it clears, or is part of.
 A PR that changes a root file (a LICENSE, hadoop-project/pom.xml) gets
@@ -66,12 +71,14 @@ Examples
     python qbt_jira.py --job hadoop-qbt-trunk-java21-linux-x86_64 --build 113
     python qbt_jira.py --format markdown --show-discarded
     python qbt_jira.py --save-dir proposals     # one description file each
+    python qbt_jira.py --profile hbase          # the HBase Nightly build of master
 """
 
 from __future__ import annotations
 
 import argparse
 import datetime
+import html as html_lib
 import json
 import os
 import re
@@ -81,11 +88,8 @@ import xml.etree.ElementTree as ET
 from typing import Any
 
 import analyze_pr as core
-from list_upstream_prs import DEFAULT_BOTS, graphql, join, resolve_token
+from list_upstream_prs import graphql, join, resolve_token
 
-DEFAULT_JENKINS = "https://ci-hadoop.apache.org"
-# The trunk jobs on Linux; java8 and java11 are kept but no longer built.
-TRUNK_JOB_RE = re.compile(r"^hadoop-qbt-trunk-java\d+-linux-x86_64$")
 HISTORY = 7
 PR_DAYS = 90
 
@@ -109,8 +113,6 @@ LINT = {"blanks", "pathlen", "xml", "hadolint", "shellcheck", "pylint", "checkst
 SPECIFIC_RE = re.compile(r"^ {4}(\S[^:]*?)\s*:\s*$")
 LINKS_RE = re.compile(r"^ {3}(\S[^:]*?):\s*$")
 ITEM_RE = re.compile(r"^ {6,}(\S.*?)\s*$")
-CONSOLE_ROW_RE = re.compile(r"^\|\s*([+-]?\d)\s*\|\s*(\S*)\s*\|[^|]*\|(.*)$")
-CONSOLE_MORE_RE = re.compile(r"^\|\s*\|\s*\|\s*\|(.*)$")
 REVISION_RE = re.compile(r"^\|\s*git revision\s*\|\s*\S+\s*/\s*([0-9a-f]{7,40})", re.M)
 
 
@@ -179,26 +181,10 @@ def parse_email_report(text: str) -> dict[str, Any]:
 
 def parse_console_report(text: str) -> dict[str, Any]:
     """git revision, and the comment of every -1 row: subsystem -> [comments]."""
-    # A long comment wraps onto rows with empty vote and subsystem cells, cut
-    # mid-word: the pieces are joined as they are.
     comments: dict[str, list[str]] = {}
-    subsystem, parts = "", []
-
-    def flush() -> None:
-        if subsystem:
-            comments.setdefault(subsystem, []).append(" ".join("".join(parts).split()))
-    for line in text.splitlines():
-        row = CONSOLE_ROW_RE.match(line)
-        more = CONSOLE_MORE_RE.match(line)
-        if row:
-            flush()
-            subsystem, parts = (row.group(2), [row.group(3)]) if row.group(1) == "-1" else ("", [])
-        elif more and subsystem:
-            parts.append(more.group(1))
-        else:
-            flush()
-            subsystem, parts = "", []
-    flush()
+    for vote, subsystem, comment in core.console_rows(text):
+        if vote == "-1":
+            comments.setdefault(subsystem, []).append(comment)
     revision = REVISION_RE.search(text)
     return {"revision": revision.group(1) if revision else "", "comments": comments}
 
@@ -259,20 +245,24 @@ def jenkins_text(url: str, limit: int = 80_000_000) -> str | None:
 
 def trunk_jobs(jenkins: str) -> list[str]:
     jobs = jenkins_json(jenkins, "jobs[name,buildable]").get("jobs") or []
-    return sorted(j["name"] for j in jobs if TRUNK_JOB_RE.match(j.get("name") or "")
+    return sorted(j["name"] for j in jobs if re.match(core.PROFILE["qbt"]["jobs"], j.get("name") or "")
                   and j.get("buildable"))
 
 
 def jdk_of(job: str) -> str:
-    match = re.search(r"java(\d+)", job)
+    match = re.search(r"(?:java|jdk)(\d+)", job)
     return f"JDK {match.group(1)}" if match else job
 
 
 def job_builds(jenkins: str, job: str, history: int, build: int | None) -> list[dict[str, Any]]:
     """The completed builds to read, newest first: the one asked for (or the
     latest) and up to history-1 before it."""
-    tree = "builds[number,result,timestamp,url,building,changeSet[items[commitId,msg]]]{0,60}"
-    builds = [b for b in jenkins_json(f"{jenkins}/job/{job}", tree).get("builds") or []
+    # changeSet on a freestyle job, changeSets on a pipeline one.
+    tree = ("builds[number,result,timestamp,url,building,changeSet[items[commitId,msg]],"
+            "changeSets[items[commitId,msg]]]{0,60}")
+    # 'HBase Nightly/master' is the job master inside the folder HBase Nightly.
+    path = "/job/".join(urllib.parse.quote(part) for part in job.split("/"))
+    builds = [b for b in jenkins_json(f"{jenkins}/job/{path}", tree).get("builds") or []
               if not b.get("building") and b.get("result") not in (None, "ABORTED", "NOT_BUILT")]
     if build is not None:
         builds = [b for b in builds if b["number"] <= build]
@@ -290,32 +280,93 @@ def read_build(job: str, build: dict[str, Any], latest: bool) -> dict[str, Any] 
                              lambda: jenkins_text(out + "email-report.txt", 5_000_000))
     if not email:
         return None
-    report = parse_email_report(email)
-    record = {
-        "job": job, "number": build["number"], "url": url,
-        "date": datetime.datetime.fromtimestamp(build["timestamp"] / 1000,
-                                                datetime.timezone.utc).date().isoformat(),
-        "commits": [{"sha": (i.get("commitId") or "")[:10], "msg": (i.get("msg") or "").strip()}
-                    for i in ((build.get("changeSet") or {}).get("items") or [])],
-        **report,
-    }
+    record = {**build_fields(job, build), **parse_email_report(email)}
     if not latest:
         return record
     console = core.disk_cached(f"qbt-console-{job}-{build['number']}",
                                lambda: jenkins_text(out + "console-report.txt", 5_000_000)) or ""
     record.update(parse_console_report(console))
     record["warnings"] = {}
-    for module in report["spotbugs"]:
+    for module in record["spotbugs"]:
         xml_url = f"{out}branch-spotbugs-{module.replace('/', '_')}-warnings.xml"
         record["warnings"][module] = core.disk_cached(
             f"qbt-spotbugs-{job}-{build['number']}-{module}",
             lambda xml_url=xml_url: spotbugs_warnings(xml_url)) or []
     record["logs"] = {}
-    for log in report["links"].get("unit", []):
+    for log in record["links"].get("unit", []):
         record["logs"][module_of_log(log)] = (core.build_log_failures(log) or {}) | {"url": log}
     record["cases"] = core.disk_cached(f"qbt-tests-{job}-{build['number']}",
                                        lambda: failed_cases(url)) or {}
     return record
+
+
+def build_fields(job: str, build: dict[str, Any]) -> dict[str, Any]:
+    changes = [build.get("changeSet") or {}] + (build.get("changeSets") or [])
+    return {
+        "job": job, "number": build["number"], "url": build["url"].rstrip("/") + "/",
+        "date": datetime.datetime.fromtimestamp(build["timestamp"] / 1000,
+                                                datetime.timezone.utc).date().isoformat(),
+        "commits": [{"sha": (i.get("commitId") or "")[:10], "msg": (i.get("msg") or "").strip()}
+                    for change in changes for i in (change.get("items") or [])],
+    }
+
+
+def html_report_text(html: str) -> str:
+    """A Yetus console-report.html as the text table parse_console_report reads:
+    '| vote | subsystem | runtime | comment' (the log column dropped)."""
+    rows = []
+    for row in re.findall(r"<tr>(.*?)</tr>", html, re.S):
+        cells = [" ".join(html_lib.unescape(re.sub(r"<[^>]*>", " ", c)).split())
+                 for c in re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", row, re.S)]
+        if len(cells) == 5:
+            del cells[3]
+        rows.append("| " + " | ".join(cells))
+    return "\n".join(rows)
+
+
+def staged_runs(jenkins: str, job: str, history: int, build: int | None,
+                log) -> dict[str, list[dict[str, Any]]]:
+    """A pipeline nightly (HBase Nightly) whose build runs one Yetus stage per
+    JDK, each in output-<stage>/: every stage is read as a job of its own."""
+    runs: dict[str, list[dict[str, Any]]] = {}
+    builds = job_builds(jenkins, job, history, build)
+    for index, entry in enumerate(builds):
+        url = entry["url"].rstrip("/") + "/"
+        name = f"{job}-{entry['number']}"
+        paths = core.disk_cached(f"nightly-artifacts-{name}", lambda: [
+            a["relativePath"] for a in jenkins_json(url, "artifacts[relativePath]").get("artifacts") or []])
+        cases = core.disk_cached(f"nightly-tests-{name}", lambda: failed_cases(url)) or {}
+        for path in paths or []:
+            found = re.fullmatch(r"output-([\w.-]+)/console-report\.html", path)
+            if not found:
+                continue
+            stage = found.group(1)
+            out = f"{url}artifact/output-{stage}/"
+            html = core.disk_cached(f"nightly-console-{name}-{stage}",
+                                    lambda: jenkins_text(out + "console-report.html", 5_000_000))
+            if not html:
+                continue
+            record = {**build_fields(stage, entry), **parse_console_report(html_report_text(html)), "logs": {}}
+            record["voted"] = list(record["comments"])
+            # The test report covers every stage; its blocks are 'yetus jdk17 hadoop3 checks'.
+            words = stage.replace("-", " ")
+            record["cases"] = {t: mine for t, found in cases.items()
+                               if (mine := [c for c in found if words in c.get("stage", "")])}
+            record["tests"] = list(record["cases"])
+            extant = [core.YETUS_EXTANT_RE.search(c) for c in record["comments"].get("spotbugs", [])]
+            record["warnings"], record["spotbugs"] = {}, {}
+            for module in (m.group(1) for m in extant if m):
+                xml_url = f"{out}branch-spotbugs-{module.replace('/', '_')}-warnings.xml"
+                warnings = core.disk_cached(f"nightly-spotbugs-{name}-{stage}-{module}",
+                                            lambda xml_url=xml_url: spotbugs_warnings(xml_url)) or []
+                record["warnings"][module] = warnings
+                record["spotbugs"][module] = "".join(f"{w['class']} {warning_text(w)}\n" for w in warnings)
+            if index == 0 or stage in runs:  # a stage the latest build lacks is not read
+                runs.setdefault(stage, []).append(record)
+    for stage, records in runs.items():
+        log(f"{stage} #{records[0]['number']} ({records[0]['date']}): -1 "
+            f"{join(records[0]['voted'], 8)}; {len(records)} build(s) read")
+    return runs
 
 
 def spotbugs_warnings(url: str) -> list[dict[str, Any]] | None:
@@ -325,7 +376,7 @@ def spotbugs_warnings(url: str) -> list[dict[str, Any]] | None:
 
 def failed_cases(build_url: str) -> dict[str, list[dict[str, Any]]] | None:
     data = jenkins_json(build_url + "testReport",
-                        "suites[cases[className,name,status,age,errorDetails]]")
+                        "suites[enclosingBlockNames,cases[className,name,status,age,errorDetails]]")
     if not data:
         return None
     cases: dict[str, list[dict[str, Any]]] = {}
@@ -335,6 +386,8 @@ def failed_cases(build_url: str) -> dict[str, list[dict[str, Any]]] | None:
                 cases.setdefault(short_test(case.get("className") or ""), []).append({
                     "name": case.get("name") or "", "age": case.get("age") or 0,
                     "error": " ".join((case.get("errorDetails") or "").split())[:300],
+                    # The pipeline stage that ran it, on a staged nightly.
+                    "stage": " ".join((suite.get("enclosingBlockNames") or [])[:1]),
                 })
     return cases
 
@@ -371,8 +424,8 @@ def owner_of(warning: dict[str, Any], listed_in: list[str], sizes: dict[str, int
 def project_key(module: str, test: str = "") -> str:
     if test:
         return core.JIRA_PROJECT_OF_TREE.get(core._project_of_test(test), "") \
-            or core.JIRA_PROJECT_OF_TREE.get(module.split("/", 1)[0], "HADOOP")
-    return core.JIRA_PROJECT_OF_TREE.get(module.split("/", 1)[0], "HADOOP")
+            or core.JIRA_PROJECT_OF_TREE.get(module.split("/", 1)[0], core.DEFAULT_PROJECT)
+    return core.JIRA_PROJECT_OF_TREE.get(module.split("/", 1)[0], core.DEFAULT_PROJECT)
 
 
 def build_candidates(runs: dict[str, list[dict[str, Any]]], sources: dict[str, str],
@@ -462,7 +515,7 @@ def failure_record(entry: dict[str, Any]) -> dict[str, Any]:
                 "warning_count": len(entry["warnings"]),
                 "detail": f"spotbugs on {entry['module']}"}
     return {"subsystem": entry["subsystem"], "detail": "; ".join(entry["comments"][:1])
-            or f"{entry['subsystem']} votes -1 on trunk"}
+            or f"{entry['subsystem']} votes -1 on {core.BASE}"}
 
 
 def present_in(entry: dict[str, Any], build: dict[str, Any]) -> bool:
@@ -511,6 +564,7 @@ query($q: String!, $after: String) {
     nodes {
       ... on PullRequest {
         number title url isDraft updatedAt author { login }
+        headRefName headRepository { nameWithOwner }
         files(first: 100) { nodes { path } }
         comments(last: 25) { nodes { author { login } createdAt body } }
       }
@@ -518,16 +572,15 @@ query($q: String!, $after: String) {
   }
 }
 """
-EXTANT_RE = re.compile(r"^\s*([\w.-]+(?:/[\w.-]+)*)\s+in\s+trunk\s+has\s+(\d+)\s+extant", re.I)
 
 
 def fetch_open_prs(repo: str, days: int, token: str | None) -> list[dict[str, Any]]:
     since = (datetime.date.today() - datetime.timedelta(days=days)).isoformat()
-    query = f"repo:{repo} is:pr is:open base:trunk updated:>={since}"
+    query = f"repo:{repo} is:pr is:open base:{core.BASE} updated:>={since}"
     prs, after = [], None
     while True:
         data = graphql(OPEN_PRS_QUERY, {"q": query, "after": after}, token)["search"]
-        prs += [n for n in data["nodes"] or [] if n]
+        prs += [core.add_actions_yetus(n, repo, token) for n in data["nodes"] or [] if n]
         if not data["pageInfo"]["hasNextPage"]:
             return prs
         after = data["pageInfo"]["endCursor"]
@@ -536,7 +589,7 @@ def fetch_open_prs(repo: str, days: int, token: str | None) -> list[dict[str, An
 def precommit_of(pr: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """{'latest': ..., 'earlier': ...}: failed tests, unit -1 modules and
     'in trunk has N extant' spotbugs modules of its Yetus comments."""
-    bots = {b.lower() for b in DEFAULT_BOTS}
+    bots = {b.lower() for b in core.DEFAULT_BOTS}
     own = {os.path.basename(f["path"]) for f in ((pr.get("files") or {}).get("nodes") or [])}
     comments = sorted((c for c in ((pr.get("comments") or {}).get("nodes") or [])
                        if ((c.get("author") or {}).get("login") or "").lower() in bots
@@ -566,7 +619,7 @@ def precommit_of(pr: dict[str, Any]) -> dict[str, dict[str, Any]]:
                 if link and module_of_log(link.group(1)):
                     into["unit"].add(module_of_log(link.group(1)))
             elif subsystem == "spotbugs":
-                extant = EXTANT_RE.match(cells[-1])
+                extant = core.YETUS_EXTANT_RE.match(cells[-1].strip())
                 if extant:
                     into["spotbugs"].add(extant.group(1))
     result["earlier"] = {k: v - result["latest"][k] for k, v in result["earlier"].items()}
@@ -639,7 +692,7 @@ def tracking(entry: dict[str, Any], repo: str, token: str | None,
     if entry["kind"] == "spotbugs":
         variants.append({k: v for k, v in record.items() if k != "classes"})
     if entry["kind"] == "lint":
-        words = [[entry["subsystem"], "trunk"], [entry["subsystem"], "qbt"]]
+        words = [[entry["subsystem"], core.BASE], [entry["subsystem"], "qbt"]]
         jiras = [j for w in words for j in core.search_jira_issues(jira_base, w, since)
                  if all(x.lower() in j["summary"].lower() for x in w)]
         return {"prs": [], "jiras": list({j["key"]: j for j in jiras}.values()), "related": []}
@@ -691,7 +744,7 @@ def status_of(entry: dict[str, Any], args: argparse.Namespace, proposal: int = 0
         how = {"verified": "already fixed", "partial": "partly fixed"}.get(
             merged[0].get("verified"), "probably fixed (not verified)")
         refs = join([f"#{p['number']} (merged {p['merged']})" for p in merged])
-        return f"{how} on trunk by {refs}: a rebase of the PRs picks it up"
+        return f"{how} on {core.BASE} by {refs}: a rebase of the PRs picks it up"
     if found["prs"]:
         how = "being fixed by" if verdicts & {"verified", "partial"} \
             else "maybe being fixed (not verified) by"
@@ -805,21 +858,25 @@ def score(entry: dict[str, Any]) -> tuple[int, str, list[tuple[int, str]]]:
 # --------------------------------------------------------------------------- #
 # The proposal
 # --------------------------------------------------------------------------- #
+def nightly() -> str:
+    return core.PROFILE["qbt"]["name"]
+
+
 def summary_of(entry: dict[str, Any], jobs_read: int) -> tuple[str, str]:
     """(JIRA project, summary)."""
     kind = entry["kind"]
     if kind == "lint":
-        return "HADOOP", f"Fix the {entry['subsystem']} -1 of the trunk qbt build"
+        return core.DEFAULT_PROJECT, f"Fix the {entry['subsystem']} -1 of the {nightly()}"
     if kind == "test":
         project = project_key(entry["module"], entry["test"])
-        summary = f"{entry['test'].rsplit('.', 1)[-1]} fails on trunk"
+        summary = f"{entry['test'].rsplit('.', 1)[-1]} fails on {core.BASE}"
     else:
         project, _, summary = core.new_jira_summary(entry["record"]).partition(": ")
         classes = entry["record"].get("classes") or {}
         if len(classes) == 1 and len(next(iter(classes.values()))) > 2:
             # Three bug types and more read badly in a summary.
             short = next(iter(classes)).split("$")[0].rsplit(".", 1)[-1]
-            summary = f"Fix the trunk SpotBugs warnings in {short}"
+            summary = f"Fix the {core.BASE} SpotBugs warnings in {short}"
     failing = [job for job, h in entry["history"].items() if h["failed"]]
     if jobs_read > 1 and len(failing) == 1 and kind in ("test", "build"):
         summary += f" with {jdk_of(failing[0])}"
@@ -831,7 +888,7 @@ def describe(entry: dict[str, Any], runs: dict[str, list[dict[str, Any]]]) -> st
     lines: list[str] = []
     kind = entry["kind"]
     if kind == "test":
-        lines.append(f"{{{{{entry['test']}}}}} fails in the nightly trunk build (qbt)"
+        lines.append(f"{{{{{entry['test']}}}}} fails in the {nightly()}"
                      + (f", module {{{{{entry['module']}}}}}" if entry["module"] else "") + ":")
         lines.append("")
         for name, case in list(entry["methods"].items())[:8]:
@@ -839,11 +896,11 @@ def describe(entry: dict[str, Any], runs: dict[str, list[dict[str, Any]]]) -> st
         if not entry["methods"]:
             lines.append("* (the test report names no method; see the unit log)")
     elif kind == "build":
-        lines.append(f"{{{{{entry['plugin']}}}}} fails on {{{{{entry['module']}}}}} in the nightly "
-                     f"trunk build (qbt), so the unit run of that module is -1 although no test "
+        lines.append(f"{{{{{entry['plugin']}}}}} fails on {{{{{entry['module']}}}}} in the "
+                     f"{nightly()}, so the unit run of that module is -1 although no test "
                      f"fails.")
     elif kind == "spotbugs":
-        lines.append(f"The nightly trunk build (qbt) reports {len(entry['warnings'])} spotbugs "
+        lines.append(f"The {nightly()} reports {len(entry['warnings'])} spotbugs "
                      f"warning(s) in {{{{{entry['module']}}}}}:")
         lines.append("")
         for warning in sorted(entry["warnings"].values(), key=lambda w: (w["class"], w["type"]))[:40]:
@@ -856,7 +913,7 @@ def describe(entry: dict[str, Any], runs: dict[str, list[dict[str, Any]]]) -> st
                      f"{join(sorted(entry['reported_in']), 8)}.")
     else:
         lines.append(f"The {{{{{entry['subsystem']}}}}} check votes -1 on the whole tree in the "
-                     f"nightly trunk build (qbt): {join(entry['comments'], 2).rstrip('.') or 'see the report'}.")
+                     f"{nightly()}: {join(entry['comments'], 2).rstrip('.') or 'see the report'}.")
     lines.append("")
     lines.append("Seen in:")
     lines.append("")
@@ -865,7 +922,7 @@ def describe(entry: dict[str, Any], runs: dict[str, list[dict[str, Any]]]) -> st
         if h["failed"]:
             lines.append(f"* {jdk_of(job)}: {h['failed']} of the last {h['read']} builds, "
                          f"latest [#{latest['number']}|{latest['url']}] ({latest['date']}"
-                         + (f", trunk {latest['revision'][:10]}" if latest.get("revision") else "")
+                         + (f", {core.BASE} {latest['revision'][:10]}" if latest.get("revision") else "")
                          + ")")
         else:
             lines.append(f"* {jdk_of(job)}: not in the last {h['read']} builds")
@@ -1016,10 +1073,13 @@ def save(proposals: list[dict[str, Any]], directory: str) -> list[str]:
 # --------------------------------------------------------------------------- #
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__,
-                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+                                     formatter_class=argparse.RawDescriptionHelpFormatter,
+                                     parents=[core.profile_parser(argv)])
+    qbt = core.PROFILE["qbt"]
     parser.add_argument("--job", action="append", default=[],
-                        help="qbt job to read. Repeatable. Default: every buildable "
-                             "hadoop-qbt-trunk-javaNN-linux-x86_64 job")
+                        help="qbt job to read. Repeatable. Default: every buildable job matching "
+                             f"{qbt['jobs']}" if "jobs" in qbt else
+                             f"nightly pipeline job path (default: {qbt['staged']})")
     parser.add_argument("--build", type=int, default=None,
                         help="with a single --job: read this build instead of the latest")
     parser.add_argument("--history", type=int, default=HISTORY,
@@ -1037,14 +1097,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="list the candidates already tracked, and by what")
     parser.add_argument("--save-dir", help="write each description there, with the "
                                            "create_jira.py command that would file it")
-    parser.add_argument("--jenkins", default=DEFAULT_JENKINS)
+    parser.add_argument("--jenkins", default=qbt["jenkins"])
     parser.add_argument("--repo", default=core.DEFAULT_REPO)
     parser.add_argument("--jira-base", default=core.DEFAULT_JIRA)
     parser.add_argument("--repo-path", default=None,
-                        help="Hadoop clone, to place spotbugs warnings in their module")
+                        help="the project's clone, to place spotbugs warnings in their module")
     parser.add_argument("--token", default=None, help="GitHub token (else $GITHUB_TOKEN or gh)")
     args = parser.parse_args(argv)
-    if args.build is not None and len(args.job) != 1:
+    if "staged" in qbt and len(args.job) > 1:
+        parser.error("a staged nightly reads one --job")
+    if args.build is not None and len(args.job) != 1 and "jobs" in qbt:
         parser.error("--build goes with exactly one --job")
     if args.history < 1:
         parser.error("--history must be 1 or more")
@@ -1060,10 +1122,14 @@ def main(argv: list[str] | None = None) -> int:
     token = resolve_token(args.token)
     log = (lambda *a: print(*a, file=sys.stderr)) if args.format != "text" else print
 
-    jobs = args.job or trunk_jobs(args.jenkins)
-    if not jobs:
-        raise SystemExit(f"no trunk qbt job found on {args.jenkins}")
+    qbt = core.PROFILE["qbt"]
+    jobs = [] if "staged" in qbt else args.job or trunk_jobs(args.jenkins)
+    if not jobs and "jobs" in qbt:
+        raise SystemExit(f"no {core.BASE} qbt job found on {args.jenkins}")
     runs: dict[str, list[dict[str, Any]]] = {}
+    if "staged" in qbt:
+        runs = staged_runs(args.jenkins, (args.job or [qbt["staged"]])[0], args.history,
+                           args.build, log)
     for job in jobs:
         builds = job_builds(args.jenkins, job, args.history, args.build)
         read = [r for r in (read_build(job, b, i == 0) for i, b in enumerate(builds)) if r]
@@ -1080,7 +1146,7 @@ def main(argv: list[str] | None = None) -> int:
     repo_path = args.repo_path or (core.DEFAULT_REPO_PATH
                                    if os.path.isdir(core.DEFAULT_REPO_PATH) else None)
     candidates = build_candidates(runs, source_modules(repo_path), args.include_lint)
-    log(f"{len(candidates)} candidate(s); reading open PRs into trunk updated in the last "
+    log(f"{len(candidates)} candidate(s); reading open PRs into {core.BASE} updated in the last "
         f"{args.pr_days} days...")
     prs = fetch_open_prs(args.repo, args.pr_days, token)
     for pr in prs:
@@ -1108,9 +1174,9 @@ def main(argv: list[str] | None = None) -> int:
 
     header = [f"{jdk_of(job)}: {job} #{b[0]['number']} ({b[0]['date']}), {len(b)} build(s) read"
               for job, b in runs.items()]
-    header.append(f"{len(prs)} open PR(s) into trunk updated in the last {args.pr_days} days")
+    header.append(f"{len(prs)} open PR(s) into {core.BASE} updated in the last {args.pr_days} days")
     if not repo_path:
-        header.append("no Hadoop clone: spotbugs warnings placed by report, not by source file")
+        header.append(f"no {core.DEFAULT_REPO} clone: spotbugs warnings placed by report, not by source file")
     if args.format == "json":
         def plain(entry: dict[str, Any]) -> dict[str, Any]:
             keep = {k: v for k, v in entry.items() if k not in ("record",)}

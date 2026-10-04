@@ -81,11 +81,10 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 import analyze_pr as core
-from list_upstream_prs import (DEFAULT_BOTS, days_since, graphql, parse_yetus_comment,
+from list_upstream_prs import (days_since, graphql, parse_yetus_comment,
                                resolve_token, summarise_reviews)
 
 ROOT = "(root)"
-NON_HUMAN = {b.lower() for b in DEFAULT_BOTS} | {"dependabot", "github-actions"}
 
 POINTS = {
     "size": ((20, 20), (100, 15), (300, 10), (1000, 4)),
@@ -120,7 +119,8 @@ query($q: String!, $after: String) {
     pageInfo { hasNextPage endCursor }
     nodes {
       ... on PullRequest {
-        number title url isDraft createdAt updatedAt baseRefName
+        number title url isDraft createdAt updatedAt baseRefName headRefName
+        headRepository { nameWithOwner }
         additions deletions changedFiles mergeable reviewDecision
         author { login }
         labels(first: 20) { nodes { name } }
@@ -159,7 +159,7 @@ def fetch_open_prs(repo: str, base: str, token: str | None) -> list[dict[str, An
     prs, after = [], None
     while True:
         data = graphql(QUERY, {"q": query, "after": after}, token)["search"]
-        prs += [n for n in data["nodes"] or [] if n]
+        prs += [core.add_actions_yetus(n, repo, token) for n in data["nodes"] or [] if n]
         print(f"\rfetched {len(prs)} open PRs", end="", file=sys.stderr, flush=True)
         if not data["pageInfo"]["hasNextPage"]:
             print(file=sys.stderr)
@@ -271,7 +271,7 @@ def project_of(title: str, modules: list[str]) -> str:
         project = core.JIRA_PROJECT_OF_TREE.get(module.split("/", 1)[0])
         if project:
             return project
-    return "HADOOP"
+    return core.DEFAULT_PROJECT
 
 
 def main_components(paths: list[str], modules: set[str]) -> set[str]:
@@ -375,7 +375,8 @@ def review_state(pr: dict[str, Any]) -> str:
     if decision == "CHANGES_REQUESTED":
         return "changes"
     approvers, requesters, commenters = summarise_reviews(pr)
-    humans = [r for r in approvers + requesters + commenters if r.lower() not in NON_HUMAN]
+    non_human = {b.lower() for b in core.DEFAULT_BOTS} | {"dependabot", "github-actions"}
+    humans = [r for r in approvers + requesters + commenters if r.lower() not in non_human]
     if approvers:
         return "approved"
     if requesters:
@@ -390,7 +391,7 @@ def last_commit(pr: dict[str, Any]) -> str:
 
 def yetus_state(pr: dict[str, Any]) -> tuple[str, bool]:
     """('+1' | '-1' | 'stale' | 'none', needs rebase) for the latest Yetus report."""
-    report = parse_yetus_comment(pr, DEFAULT_BOTS)
+    report = parse_yetus_comment(pr, core.DEFAULT_BOTS)
     if report is None or not report.overall:
         return "none", False
     if (report.posted_at or "") < last_commit(pr):
@@ -606,15 +607,16 @@ def render_markdown(entries: list[Entry] | None, picked: list[Entry] | None,
 # --------------------------------------------------------------------------- #
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__,
-                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+                                     formatter_class=argparse.RawDescriptionHelpFormatter,
+                                     parents=[core.profile_parser(argv)])
     parser.add_argument("--repo", default=core.DEFAULT_REPO,
                         help=f"repository, owner/name (default: {core.DEFAULT_REPO})")
-    parser.add_argument("--base", default="trunk",
-                        help="target branch, '*' for any (default: trunk)")
+    parser.add_argument("--base", default=core.BASE,
+                        help=f"target branch, '*' for any (default: {core.BASE})")
     parser.add_argument("--user", default=core.DEFAULT_AUTHOR,
                         help=f"your GitHub login (default: {core.DEFAULT_AUTHOR})")
     parser.add_argument("--repo-path", default=core.DEFAULT_REPO_PATH,
-                        help="Hadoop clone, for the modules and your history "
+                        help="the project's clone, for the modules and your history "
                              f"(default: {core.DEFAULT_REPO_PATH})")
     parser.add_argument("--view", choices=("all", "components", "recommend"), default="all",
                         help="what to print (default: all)")

@@ -1,5 +1,6 @@
 """Offline smoke test of qbt_jira.py: parse a small qbt report, build and score its candidates."""
 import os, sys; sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+os.environ.pop("PRTRACKER_PROFILE", None)  # the fixtures are hadoop ones
 import qbt_jira as q
 
 EMAIL = """
@@ -264,4 +265,36 @@ assert q.status_of(rumen, args, 2) == "nobody works on it: proposal [2] below"
 # A tracked candidate is listed when it helps a PR; one that helps none is not.
 shown, hidden = q.ranking([rumen], [nm, {**test, "helps": []}], args)
 assert [e["summary"] for e, _ in shown] == [nm["summary"], rumen["summary"]] and hidden == 1
+
+# The hbase profile: its keys, its base branch, and the HTML report of its staged nightly.
+q.core.use_profile("hbase")
+try:
+    assert q.core.JIRA_IN_TEXT_RE.fullmatch("HBASE-30447") and not q.core.JIRA_IN_TEXT_RE.search("YARN-1")
+    assert q.core.new_jira_summary({"test": "hadoop.hbase.TestX"}) == "HBASE: TestX fails on master"
+    HTML = """<table><tr><th>-1 overall</th></tr></table><table>
+<tr><th>Vote</th><th>Subsystem</th><th>Runtime</th><th>Log</th><th>Comment</th></tr>
+<tr><td><font color="red">-1</font></td><td> spotbugs </td><td>1m</td><td><a href="x">/x.txt</a></td>
+<td> hbase-server in master has 2 extant spotbugs warnings. </td></tr>
+<tr><td>+1</td><td> unit </td><td>9m</td><td></td><td> root in the source passed. </td></tr>
+<tr><td> git revision </td><td> master / 20c3d0110af40fba5b34166481e396d6b5a87a7c </td></tr></table>"""
+    console = q.parse_console_report(q.html_report_text(HTML))
+    assert console["revision"].startswith("20c3d011"), console
+    assert console["comments"] == {"spotbugs": ["hbase-server in master has 2 extant spotbugs warnings."]}
+    assert q.core.YETUS_EXTANT_RE.search(console["comments"]["spotbugs"][0]).group(1) == "hbase-server"
+    assert q.jdk_of("jdk21-hadoop3") == "JDK 21"
+    # console.txt of a GitHub Actions Yetus artifact: wrapped comments, section rows, -0.
+    ACTIONS = """|      |                 |            | Patch Compile Tests
++---------------------------------------------------------------------------
+|  -0  |     checkstyle  |   0m 48s   | hbase-server: The patch generated 3 new
+|      |                 |            | + 0 unchanged - 0 fixed = 3 total (was
+|      |                 |            | 0)
+|  -1  |       spotbugs  |   1m 36s   | hbase-server generated 6 new + 0
+|      |                 |            | unchanged - 0 fixed = 6 total (was 0)
+|      |                 |  36m 22s   |"""
+    assert q.core.console_rows(ACTIONS) == [
+        ("-0", "checkstyle", "hbase-server: The patch generated 3 new + 0 unchanged - 0 fixed = 3 total (was 0)"),
+        ("-1", "spotbugs", "hbase-server generated 6 new + 0 unchanged - 0 fixed = 6 total (was 0)")]
+finally:
+    q.core.use_profile("hadoop")
+assert q.core.new_jira_summary({"test": "hadoop.yarn.TestX"}) == "YARN: TestX fails on trunk"
 print("qbt_smoke: OK")
