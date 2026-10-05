@@ -39,14 +39,9 @@ import os
 import sys
 from typing import Any
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-try:
-    import analyze_pr as core
-    import fix_dependencies as fd
-    from list_upstream_prs import join, resolve_token
-except ImportError:  # pragma: no cover - misplaced file
-    raise SystemExit("analyze_pr.py, fix_dependencies.py and list_upstream_prs.py must "
-                     "sit next to this script.")
+import analyze_pr as core
+import fix_dependencies as fd
+from list_upstream_prs import join, resolve_token
 
 
 # --------------------------------------------------------------------------- #
@@ -56,7 +51,7 @@ def split_suggestion(suggestion: str) -> tuple[str, str]:
     """'YARN: TestX fails on trunk' -> ('YARN', 'TestX fails on trunk')."""
     project, _, summary = suggestion.partition(": ")
     if not summary or not project.isupper():
-        return "HADOOP", suggestion
+        return core.DEFAULT_PROJECT, suggestion
     return project, summary
 
 
@@ -216,7 +211,8 @@ def show(proposal: dict[str, Any], index: int, total: int, args: argparse.Namesp
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__,
-                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+                                     formatter_class=argparse.RawDescriptionHelpFormatter,
+                                     parents=[core.profile_parser(argv)])
     parser.add_argument("target", nargs="*", help="PR number(s) and/or JIRA id(s)")
     parser.add_argument("--all-open", nargs="?", const=core.DEFAULT_AUTHOR, default=None,
                         metavar="AUTHOR", help="every open PR of an author")

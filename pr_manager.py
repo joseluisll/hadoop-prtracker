@@ -10,7 +10,8 @@ One screen drives what the command-line scripts do separately:
 * Dependencies - the JIRA links (one per pair) and the 'Depends on' /
   'Required by' lists of your PR descriptions (both sides when both PRs are
   yours) the evidence asks for, for one PR or all of them, applied one change
-  at a time (fix_dependencies.py);
+  at a time (fix_dependencies.py); 'Plan all' also draws those dependencies
+  in pr-graph.svg, in the working directory (pr_graph.py);
 * Branches     - the stale branches of the fork (list_stale_branches.py),
   report only.
 
@@ -35,16 +36,15 @@ import subprocess
 import sys
 import webbrowser
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
+import analyze_pr as core
+import fix_dependencies as fd
+import list_upstream_prs as lup
+import pr_graph
+
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, HERE)
-try:
-    import analyze_pr as core
-    import fix_dependencies as fd
-    import list_upstream_prs as lup
-except ImportError as exc:  # pragma: no cover - misplaced file
-    raise SystemExit(f"pr_manager.py must sit next to the other PR scripts ({exc}).")
 
 try:
     from rich.text import Text
@@ -63,8 +63,8 @@ STATE_STYLE = {"pending": "", "applied": "bold green", "failed": "bold red", "sk
 BRANCH_STYLE = {"STALE": "red", "CANDIDATE": "yellow", "ACTIVE": "green"}
 # In-memory caches of analyze_pr.py dropped by a refresh; the log caches on
 # disk stay, a build log never changes.
-CORE_CACHES = ("_MINI_CACHE", "_PEER_CACHE", "_JIRA_PR_CACHE", "_DIFF_CACHE", "_CI_CACHE",
-               "_FIXER_SEARCH_CACHE", "_JIRA_SEARCH_CACHE")
+CORE_CACHES = (core.fetch_pr_summary, core.fetch_peer_prs, core.pr_for_jira_cached, core.pr_diff,
+               core.fetch_ci_failures, core._search_prs, core._search_jira)
 
 
 @dataclass
@@ -249,6 +249,7 @@ class PRManager(App):
         self.plan: list[PlanItem] = []
         self.plan_notes: list[str] = []
         self.plan_scope: list[int] = []
+        self.plan_graph = False
         self.branches: list[dict[str, Any]] = []
         self.sub_title = f"{settings.author} -> {settings.repo}:{settings.base}"
 
@@ -356,7 +357,7 @@ class PRManager(App):
         self.status_from_thread("prs", f"loading the open PRs of {s.author} ...")
         try:
             pulls = lup.fetch_pull_requests(s.repo, s.author, s.token)
-            bots = list(lup.DEFAULT_BOTS)
+            bots = list(core.DEFAULT_BOTS)
             # Drafts included: a stacked draft is where dependencies pile up.
             rows = [
                 lup.evaluate(pr, bots, s.stale_days) for pr in pulls
@@ -467,10 +468,10 @@ class PRManager(App):
             self.notify("the PR list is not loaded yet", severity="warning")
             return
         self.show_tab("deps")
-        self.make_plan([str(r.number) for r in self.rows])
+        self.make_plan([str(r.number) for r in self.rows], graph=True)
 
     @work(thread=True, exclusive=True, group="bundle")
-    def make_plan(self, targets: list[str]) -> None:
+    def make_plan(self, targets: list[str], graph: bool = False) -> None:
         worker = get_current_worker()
         s, o = self.settings, self.options
         items: list[PlanItem] = []
@@ -513,10 +514,30 @@ class PRManager(App):
                 # A description of another PR: that is the one to fetch again.
                 touched = change.target[1:] if change.target.startswith("#") else ""
                 items.append(PlanItem(change, int(touched) if touched.isdigit() else number))
-        self.call_from_thread(self.fill_plan, items, notes, targets)
+        if graph:
+            notes.insert(0, self.write_graph(bundles))
+        self.call_from_thread(self.fill_plan, items, notes, targets, graph)
 
-    def fill_plan(self, items: list[PlanItem], notes: list[str], targets: list[str]) -> None:
+    def write_graph(self, bundles: list[Bundle]) -> str:
+        """Draw the open PRs and the dependencies the plan writes; returns a note."""
+        s = self.settings
+        prs = [{"number": r.number, "title": r.title, "status": r.status, "url": r.url,
+                "jira": jira_key_in(r.title)} for r in self.rows]
+        try:  # a bug here must not take the plan down with it
+            planned = {b.pr["number"]: fd.solid_lists(fd.Target(b.pr, b.jira, b.deps))[:2]
+                       for b in bundles}
+            graph = pr_graph.build_graph(prs, planned)
+            svg = pr_graph.render_svg(graph, f"Open PRs of {s.author} into {s.repo}:{s.base}",
+                                      datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %Z"))
+            path = pr_graph.write_svg(pr_graph.DEFAULT_GRAPH_FILE, svg)
+        except Exception as exc:
+            return f"graph not written: {exc}"
+        return f"graph written to {path}: {len(graph.edges)} planned dependency(ies)"
+
+    def fill_plan(self, items: list[PlanItem], notes: list[str], targets: list[str],
+                  graph: bool) -> None:
         self.plan, self.plan_notes, self.plan_scope = items, notes, targets
+        self.plan_graph = graph
         self.refresh_plan_table()
         self.query_one("#plan-notes", Static).update(text("\n".join(notes) or "no notes"))
         scope = f"#{targets[0]}" if len(targets) == 1 else f"{len(targets)} PRs"
@@ -626,14 +647,18 @@ class PRManager(App):
     # ----- branches --------------------------------------------------------- #
     @work(thread=True, exclusive=True, group="branches")
     def load_branches(self, fetch: bool) -> None:
+        # Without a clone of the project list_stale_branches.py would run in this repository instead.
+        if not self.settings.repo_path:
+            self.fail_from_thread("branches", "listing the branches", RuntimeError(
+                f"no {core.DEFAULT_REPO} clone at {core.DEFAULT_REPO_PATH}; "
+                f"pass --repo-path or set {core.PROFILE['clone_env']}"))
+            return
         self.status_from_thread("branches", "fetching and comparing branches ..." if fetch
                                 else "comparing branches ...")
         command = [sys.executable, os.path.join(HERE, "list_stale_branches.py"),
-                   "--format", "json", "--all"]
+                   "--format", "json", "--all", "--repo-path", self.settings.repo_path]
         if not fetch:
             command.append("--no-fetch")
-        if self.settings.repo_path:
-            command += ["--repo-path", self.settings.repo_path]
         try:
             done = subprocess.run(command, capture_output=True, text=True, encoding="utf-8",
                                   errors="replace", timeout=900, cwd=HERE)
@@ -687,16 +712,14 @@ class PRManager(App):
             return
         # Fetch everything again: CI may have run, JIRA may have changed.
         self.bundles.clear()
-        for name in CORE_CACHES:
-            cache = getattr(core, name, None)
-            if isinstance(cache, dict):
-                cache.clear()
+        for cached in CORE_CACHES:
+            cached.cache_clear()
         if tab == "prs":
             self.load_prs()
         elif tab == "analysis" and self.current and self.current.pr:
             self.analyse(str(self.current.pr["number"]))
         elif tab == "deps" and self.plan_scope:
-            self.make_plan(self.plan_scope)
+            self.make_plan(self.plan_scope, self.plan_graph)
         self.show_credentials()
 
     def action_open_pr(self) -> None:
@@ -720,16 +743,17 @@ class PRManager(App):
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
+        parents=[core.profile_parser(argv)],
     )
     parser.add_argument("--author", default=lup.DEFAULT_FORK_OWNER,
                         help=f"whose open PRs to list (default: {lup.DEFAULT_FORK_OWNER})")
     parser.add_argument("--repo", default=core.DEFAULT_REPO)
-    parser.add_argument("--base", default=lup.DEFAULT_BASE_BRANCH,
-                        help="target branch upstream, '*' for any (default: trunk)")
+    parser.add_argument("--base", default=core.BASE,
+                        help=f"target branch upstream, '*' for any (default: {core.BASE})")
     parser.add_argument("--jira-base", default=core.DEFAULT_JIRA)
     parser.add_argument("--repo-path", default=None,
-                        help=f"the Hadoop clone (default: {core.DEFAULT_REPO_PATH})")
+                        help=f"the project's clone (default: {core.DEFAULT_REPO_PATH})")
     parser.add_argument("--stale-days", type=int, default=14)
     parser.add_argument("--no-ci-search", action="store_true",
                         help="start with the search of others' PRs and JIRA switched off")

@@ -1,5 +1,6 @@
 """Offline smoke test of fix_dependencies.plan_all: prints the plan for three fake PRs."""
 import os, sys; sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+os.environ.pop("PRTRACKER_PROFILE", None)  # the fixtures are hadoop ones
 import analyze_pr as core, fix_dependencies as fd
 fd.viewer_login = lambda t: "me"
 J = lambda key, links=(): core.Jira(key=key, found=True, links=list(links)) if 'found' in core.Jira.__dataclass_fields__ else None
@@ -24,6 +25,14 @@ body = "intro\n\n" + fd.build_block([dep(9)], []) + "\n\nrest"
 out = fd.add_to_block(body, "required", "#1", "- #1 (HADOOP-1) - x")
 print(out); print(core.split_managed_block(out)[1])
 print("idempotent:", fd.add_to_block(out, "required", "#1", "- #1 (HADOOP-1) - x") == out)
+assert core.split_managed_block(out)[1] == {"depends": ["#9"], "required": ["#1"]}
+assert out.split()[0] == "intro" and out.split()[-1] == "rest"   # text around the block is kept
+assert fd.add_to_block(out, "required", "#1", "- #1 (HADOOP-1) - x") == out
+plans = {n: (ch, notes) for n, ch, notes in fd.plan_all([A, B, C_], "o/r", "https://j", None, False, False, "me")}
+assert sorted(c.key for c in plans[1][0]) == ["add:4:depends:1", "body:1", "link:HADOOP-1>HADOOP-4",
+                                             "link:HADOOP-2>HADOOP-1", "link:HADOOP-3>HADOOP-1"]
+assert [c.key for c in plans[2][0]] == ["body:2"]
+assert plans[3][0] == []   # bob's PR is never edited and its link is already proposed for #1
 
 # A subclass test failing at line 712 of its parent: a hunk over that line fixes it,
 # an edit elsewhere in the same file does not.
@@ -45,3 +54,4 @@ E = fd.Target(pr(5), J("HADOOP-5", links),
 (_, changes, _), = fd.plan_all([E], "o/r", "https://j", None, True, False, "me")
 print("removes:", [c.key for c in changes])
 assert [c.key for c in changes] == ["unlink:6"]
+print("plan_smoke: OK")

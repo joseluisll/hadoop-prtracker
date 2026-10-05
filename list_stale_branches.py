@@ -30,14 +30,12 @@ Examples
 --------
     python list_stale_branches.py
     python list_stale_branches.py --all --format markdown
-    python list_stale_branches.py --include-mirrors --format csv > branches.csv
     python list_stale_branches.py --no-fetch --format json | jq '.[].status'
 """
 
 from __future__ import annotations
 
 import argparse
-import csv
 import datetime as dt
 import json
 import os
@@ -49,25 +47,13 @@ import textwrap
 from dataclasses import dataclass, field, asdict
 from typing import Any, Iterable
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-try:
-    from list_upstream_prs import graphql, resolve_token
-except ImportError:  # pragma: no cover - misplaced file
-    raise SystemExit(
-        "list_upstream_prs.py must sit next to this script "
-        "(it provides the GitHub authentication helpers)."
-    )
+import analyze_pr as core
+from analyze_pr import has_commit, is_ancestor
+from list_upstream_prs import DEFAULT_FORK_OWNER, graphql, resolve_token
 
-DEFAULT_FORK = "joseluisll/hadoop"
-DEFAULT_UPSTREAM = "apache/hadoop"
 DEFAULT_FORK_REMOTE = "origin"
 DEFAULT_UPSTREAM_REMOTE = "upstream"
-DEFAULT_BASE_REF = "upstream/trunk"
-# The script lives outside the clone, so fall back to the usual checkout when
-# the working directory is not a git repository.
-DEFAULT_REPO_PATH = r"C:\dev\hadoop"
 
-JIRA_RE = re.compile(r"\b(HADOOP|HDFS|YARN|MAPREDUCE|HDDS|SUBMARINE|OZONE)-(\d+)\b", re.I)
 
 PR_SEARCH_QUERY = """
 query($q: String!, $after: String) {
@@ -114,10 +100,14 @@ class Git:
         if not shutil.which("git"):
             raise SystemExit("git is not on PATH.")
         self.cwd = cwd or os.getcwd()
-        if self.run("rev-parse", "--is-inside-work-tree", check=False).strip() != "true":
-            if cwd or not os.path.isdir(DEFAULT_REPO_PATH):
+        # Run from inside prtracker's own clone, the current directory is not the Hadoop one.
+        own_clone = os.path.dirname(os.path.abspath(__file__))
+        toplevel = self.run("rev-parse", "--show-toplevel", check=False).strip()
+        if (self.run("rev-parse", "--is-inside-work-tree", check=False).strip() != "true"
+                or (not cwd and toplevel and os.path.samefile(toplevel, own_clone))):
+            if cwd or not os.path.isdir(core.DEFAULT_REPO_PATH):
                 raise SystemExit(f"{self.cwd} is not a git clone; pass --repo-path.")
-            self.cwd = DEFAULT_REPO_PATH
+            self.cwd = core.DEFAULT_REPO_PATH
         self.root = self.run("rev-parse", "--show-toplevel").strip() or self.cwd
 
     def run(self, *args: str, check: bool = True) -> str:
@@ -138,28 +128,6 @@ class Git:
 
     def lines(self, *args: str, check: bool = True) -> list[str]:
         return [line for line in self.run(*args, check=check).splitlines() if line.strip()]
-
-    def has_ref(self, ref: str) -> bool:
-        # The ^{commit} suffix matters: 'rev-parse --verify <sha>' happily
-        # echoes back a full sha whose object is not in this clone.
-        return (
-            subprocess.run(
-                ["git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
-                cwd=self.cwd,
-                capture_output=True,
-            ).returncode
-            == 0
-        )
-
-    def is_ancestor(self, older: str, newer: str) -> bool:
-        return (
-            subprocess.run(
-                ["git", "merge-base", "--is-ancestor", older, newer],
-                cwd=self.cwd,
-                capture_output=True,
-            ).returncode
-            == 0
-        )
 
     def count(self, rev_range: str) -> int:
         out = self.run("rev-list", "--count", rev_range, check=False).strip()
@@ -287,8 +255,8 @@ def gather_pull_requests(
 # Relation analysis
 # --------------------------------------------------------------------------- #
 def jira_key(text: str) -> str | None:
-    match = JIRA_RE.search(text or "")
-    return f"{match.group(1).upper()}-{match.group(2)}" if match else None
+    match = core.JIRA_IN_TEXT_RE.search(text or "")
+    return match.group(0).upper() if match else None
 
 
 def compute_relations(
@@ -305,7 +273,7 @@ def compute_relations(
     for ref_name, prs in open_prs.items():
         anchor = branches.get(ref_name)
         tip = anchor.sha if anchor else (prs[0].get("headRefOid") or "")
-        if not tip or not git.has_ref(tip):
+        if not tip or not has_commit(git.cwd, tip):
             continue
 
         own = git.lines(
@@ -474,7 +442,7 @@ def classify(
         notes.append("history comparison was truncated, relation not fully verified")
         status = "CANDIDATE"
 
-    looks_upstream = bool(re.match(r"(branch-|rel/|gh-pages|feature-|trunk)", branch.name))
+    looks_upstream = bool(re.match(rf"(branch-|rel/|gh-pages|feature-|{core.BASE})", branch.name))
     if know_upstream and looks_upstream and not branch.upstream_sha:
         notes.append(f"no branch with this name in {upstream_name} any more")
     if branch.ahead and status != "ACTIVE":
@@ -558,30 +526,21 @@ def render_markdown(rows: list[Row], fork: str) -> str:
     return "\n".join(lines)
 
 
-def render_csv(rows: list[Row], stream) -> None:
-    writer = csv.writer(stream, lineterminator="\n")
-    writer.writerow(
-        ["Branch", "Status", "Last commit", "Ahead", "Behind", "Age (days)", "Comments"]
-    )
-    for row in rows:
-        writer.writerow(
-            [row.branch, row.status, row.last_commit, row.ahead, row.behind,
-             row.age_days if row.age_days is not None else "", row.comments]
-        )
-
-
 # --------------------------------------------------------------------------- #
 # Entry point
 # --------------------------------------------------------------------------- #
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
+        parents=[core.profile_parser(argv)],
     )
-    parser.add_argument("--fork", default=DEFAULT_FORK, help=f"fork, owner/name (default: {DEFAULT_FORK})")
-    parser.add_argument("--upstream", default=DEFAULT_UPSTREAM, help=f"upstream repository (default: {DEFAULT_UPSTREAM})")
+    fork = f"{DEFAULT_FORK_OWNER}/{core.DEFAULT_REPO.split('/')[1]}"
+    base_ref = f"{DEFAULT_UPSTREAM_REMOTE}/{core.BASE}"
+    parser.add_argument("--fork", default=fork, help=f"fork, owner/name (default: {fork})")
+    parser.add_argument("--upstream", default=core.DEFAULT_REPO, help=f"upstream repository (default: {core.DEFAULT_REPO})")
     parser.add_argument("--fork-remote", default=DEFAULT_FORK_REMOTE, help="git remote for the fork (default: origin)")
     parser.add_argument("--upstream-remote", default=DEFAULT_UPSTREAM_REMOTE, help="git remote for upstream (default: upstream)")
-    parser.add_argument("--base-ref", default=DEFAULT_BASE_REF, help=f"base branch to compare against (default: {DEFAULT_BASE_REF})")
+    parser.add_argument("--base-ref", default=base_ref, help=f"base branch to compare against (default: {base_ref})")
     parser.add_argument("--no-fetch", action="store_true", help="skip 'git fetch' and use the refs already present")
     parser.add_argument("--offline", action="store_true", help="no git network access at all (implies --no-fetch); upstream branches are read from local refs")
     parser.add_argument("--fetch-upstream-branches", action="store_true", help="fetch every upstream branch (bigger download) so branches sharing a name with one can be compared exactly instead of being left in doubt")
@@ -590,10 +549,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--only", default=None, help="comma separated statuses to keep, e.g. STALE or STALE,CANDIDATE")
     parser.add_argument("--recent-days", type=int, default=30, help="a branch touched within this many days is a CANDIDATE (default: 30)")
     parser.add_argument("--max-pr-commits", type=int, default=25, help="commits per open-PR branch inspected for shared history (default: 25)")
-    parser.add_argument("--protect", action="append", default=None, metavar="BRANCH", help="branch never reported as stale (default: trunk, main, master)")
-    parser.add_argument("--format", choices=("table", "markdown", "csv", "json"), default="table")
+    parser.add_argument("--protect", action="append", default=None, metavar="BRANCH", help=f"branch never reported as stale (default: {core.BASE}, trunk, main, master)")
+    parser.add_argument("--format", choices=("table", "markdown", "json"), default="table")
     parser.add_argument("--width", type=int, default=None, help="table width (default: terminal width)")
-    parser.add_argument("--repo-path", default=None, help=f"path of the git clone (default: current directory, or {DEFAULT_REPO_PATH} when it is not one)")
+    parser.add_argument("--repo-path", default=None, help=f"path of the git clone (default: current directory, or {core.DEFAULT_REPO_PATH} when it is not one)")
     parser.add_argument("--token", default=None, help="GitHub token (else $GITHUB_TOKEN or gh)")
     return parser.parse_args(argv)
 
@@ -605,7 +564,7 @@ def main(argv: list[str] | None = None) -> int:
         pass
 
     args = parse_args(argv)
-    protected = set(args.protect or ["trunk", "main", "master"])
+    protected = set(args.protect or [core.BASE, "trunk", "main", "master"])
     git = Git(args.repo_path)
 
     if not args.no_fetch and not args.offline:
@@ -620,7 +579,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             git.run("fetch", args.upstream_remote, check=False)
 
-    if not git.has_ref(args.base_ref):
+    if not has_commit(git.cwd, args.base_ref):
         raise SystemExit(
             f"Base ref {args.base_ref} not found; pass --base-ref or fetch "
             f"the {args.upstream_remote} remote."
@@ -667,12 +626,12 @@ def main(argv: list[str] | None = None) -> int:
 
         # How does it stand against the upstream branch carrying the same name?
         if branch.upstream_sha:
-            if not git.has_ref(branch.upstream_sha):
+            if not has_commit(git.cwd, branch.upstream_sha):
                 branch.upstream_relation = "unknown"
-            elif git.is_ancestor(branch.sha, branch.upstream_sha):
+            elif is_ancestor(git.cwd, branch.sha, branch.upstream_sha):
                 branch.upstream_relation = "behind"
                 branch.upstream_behind = git.count(f"{branch.sha}..{branch.upstream_sha}")
-            elif git.is_ancestor(branch.upstream_sha, branch.sha):
+            elif is_ancestor(git.cwd, branch.upstream_sha, branch.sha):
                 branch.upstream_relation = "ahead"
             else:
                 branch.upstream_relation = "diverged"
@@ -697,9 +656,6 @@ def main(argv: list[str] | None = None) -> int:
     if args.format == "json":
         json.dump([asdict(r) for r in rows], sys.stdout, indent=2)
         sys.stdout.write("\n")
-        return 0
-    if args.format == "csv":
-        render_csv(rows, sys.stdout)
         return 0
     if not rows:
         print("Nothing to report.")

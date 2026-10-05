@@ -29,7 +29,6 @@ Examples
 from __future__ import annotations
 
 import argparse
-import csv
 import datetime as dt
 import json
 import os
@@ -49,10 +48,7 @@ GRAPHQL_URL = "https://api.github.com/graphql"
 RETRIES = 3
 RETRY_WAIT = 2.0  # seconds, multiplied by the attempt number
 
-DEFAULT_UPSTREAM = "apache/hadoop"
 DEFAULT_FORK_OWNER = "joseluisll"
-DEFAULT_BASE_BRANCH = "trunk"
-DEFAULT_BOTS = ("hadoop-yetus",)
 
 # Contexts whose name matches this are the ASF Jenkins / Yetus precommit job
 # rather than a GitHub Actions workflow.
@@ -156,6 +152,27 @@ def resolve_token(explicit: str | None) -> str | None:
     return None
 
 
+def fetch(request: urllib.request.Request, timeout: float = 60,
+          limit: int | None = None) -> tuple[int, bytes]:
+    """urlopen with retries on transient failures: (status, body).
+
+    An HTTP error comes back as (code, error body), an unreachable host as
+    (0, reason). Long runs hit the odd dropped connection or TLS reset; a
+    couple of retries are cheaper than losing the whole report.
+    """
+    for attempt in range(RETRIES):
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return response.status, response.read(limit)
+        except urllib.error.HTTPError as exc:
+            if exc.code not in (429, 502, 503, 504) or attempt == RETRIES - 1:
+                return exc.code, exc.read()
+        except (urllib.error.URLError, ssl.SSLError, ConnectionError, TimeoutError) as exc:
+            if attempt == RETRIES - 1:
+                return 0, str(getattr(exc, "reason", exc)).encode()
+        time.sleep(RETRY_WAIT * (attempt + 1))
+
+
 def graphql(query: str, variables: dict[str, Any], token: str | None) -> dict[str, Any]:
     payload = json.dumps({"query": query, "variables": variables}).encode()
     headers = {
@@ -165,26 +182,12 @@ def graphql(query: str, variables: dict[str, Any], token: str | None) -> dict[st
     }
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    request = urllib.request.Request(GRAPHQL_URL, data=payload, headers=headers)
-    # Long runs hit the odd dropped connection or TLS reset; a couple of
-    # retries are cheaper than losing the whole report.
-    for attempt in range(RETRIES):
-        try:
-            with urllib.request.urlopen(request, timeout=60) as response:
-                body = json.loads(response.read().decode())
-            break
-        except urllib.error.HTTPError as exc:  # pragma: no cover - network failure
-            if exc.code in (502, 503, 504) and attempt < RETRIES - 1:
-                time.sleep(RETRY_WAIT * (attempt + 1))
-                continue
-            detail = exc.read().decode(errors="replace")[:500]
-            raise SystemExit(f"GitHub API error {exc.code}: {detail}") from exc
-        except (urllib.error.URLError, ssl.SSLError, ConnectionError, TimeoutError) as exc:
-            if attempt < RETRIES - 1:
-                time.sleep(RETRY_WAIT * (attempt + 1))
-                continue
-            reason = getattr(exc, "reason", exc)
-            raise SystemExit(f"Cannot reach the GitHub API: {reason}") from exc
+    status, data = fetch(urllib.request.Request(GRAPHQL_URL, data=payload, headers=headers))
+    if status == 0:
+        raise SystemExit(f"Cannot reach the GitHub API: {data.decode(errors='replace')}")
+    if status != 200:
+        raise SystemExit(f"GitHub API error {status}: {data.decode(errors='replace')[:500]}")
+    body = json.loads(data.decode())
     if body.get("errors"):
         messages = "; ".join(e.get("message", str(e)) for e in body["errors"])
         raise SystemExit(f"GraphQL error: {messages}")
@@ -208,7 +211,8 @@ def fetch_pull_requests(
         if not result["pageInfo"]["hasNextPage"]:
             break
         cursor = result["pageInfo"]["endCursor"]
-    return nodes
+    import analyze_pr as core  # it imports this module
+    return [core.add_actions_yetus(pr, upstream, token) for pr in nodes]
 
 
 # --------------------------------------------------------------------------- #
@@ -561,27 +565,21 @@ def render_markdown(rows: list[PullRequestRow]) -> str:
     return "\n".join(lines)
 
 
-def render_csv(rows: list[PullRequestRow], stream) -> None:
-    writer = csv.writer(stream, lineterminator="\n")
-    writer.writerow(["ID", "Title", "Branch", "Status", "Comments", "URL"])
-    for row in rows:
-        writer.writerow(
-            [row.number, row.title, row.branch, row.status, row.comments, row.url]
-        )
-
-
 # --------------------------------------------------------------------------- #
 # Entry point
 # --------------------------------------------------------------------------- #
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    import analyze_pr as core  # it imports this module: the project defaults live there
+
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        parents=[core.profile_parser(argv)],
     )
     parser.add_argument(
         "--upstream",
-        default=DEFAULT_UPSTREAM,
-        help=f"upstream repository, owner/name (default: {DEFAULT_UPSTREAM})",
+        default=core.DEFAULT_REPO,
+        help=f"upstream repository, owner/name (default: {core.DEFAULT_REPO})",
     )
     parser.add_argument(
         "--fork-owner",
@@ -595,8 +593,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--base",
-        default=DEFAULT_BASE_BRANCH,
-        help=f"target branch upstream, '*' for any (default: {DEFAULT_BASE_BRANCH})",
+        default=core.BASE,
+        help=f"target branch upstream, '*' for any (default: {core.BASE})",
     )
     parser.add_argument(
         "--include-drafts",
@@ -619,11 +617,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="append",
         default=None,
         metavar="LOGIN",
-        help=f"login of the precommit bot (default: {', '.join(DEFAULT_BOTS)})",
+        help=f"login of the precommit bot (default: {', '.join(core.DEFAULT_BOTS)})",
     )
     parser.add_argument(
         "--format",
-        choices=("table", "markdown", "csv", "json"),
+        choices=("table", "markdown", "json"),
         default="table",
         help="output format (default: table)",
     )
@@ -634,7 +632,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="table width in columns (default: terminal width)",
     )
     parser.add_argument("--token", default=None, help="GitHub token (else $GITHUB_TOKEN or gh)")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    args.bot = args.bot or list(core.DEFAULT_BOTS)
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -646,7 +646,7 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parse_args(argv)
     author = args.author or args.fork_owner
-    bots = args.bot or list(DEFAULT_BOTS)
+    bots = args.bot
     token = resolve_token(args.token)
 
     pulls = fetch_pull_requests(args.upstream, author, token)
@@ -669,9 +669,6 @@ def main(argv: list[str] | None = None) -> int:
     if args.format == "json":
         json.dump([asdict(r) for r in rows], sys.stdout, indent=2)
         sys.stdout.write("\n")
-        return 0
-    if args.format == "csv":
-        render_csv(rows, sys.stdout)
         return 0
 
     if not rows:
