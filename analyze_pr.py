@@ -61,7 +61,7 @@ import urllib.parse
 import urllib.request
 import zipfile
 from dataclasses import dataclass, field, asdict
-from typing import Any
+from typing import Any, Callable
 
 from list_upstream_prs import (
     classify_contexts,
@@ -472,22 +472,25 @@ def fetch_diff(repo: str, number: int, token: str | None, max_bytes: int = 4_000
 
 
 def parse_diff(text: str) -> dict[str, dict[str, Any]]:
-    """path -> {'added': [(line, text)], 'removed': [...], 'ranges': [(from, to)]}."""
+    """path -> {'added': [(line, text)], 'removed': [...], 'ranges': [(from, to)],
+    'trunk': [(from, to)]}: 'ranges' in the new file, 'trunk' in the old one."""
     files: dict[str, dict[str, Any]] = {}
     path = None
     new_line = 0
     for line in text.splitlines():
         if line.startswith("+++ b/"):
             path = line[6:].strip()
-            files.setdefault(path, {"added": [], "removed": [], "ranges": []})
+            files.setdefault(path, {"added": [], "removed": [], "ranges": [], "trunk": []})
             continue
         if line.startswith("@@") and path:
-            hunk = re.match(r"@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", line)
+            hunk = re.match(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", line)
             if hunk:
-                start = int(hunk.group(1))
-                length = int(hunk.group(2) or 1)
+                old, old_length = int(hunk.group(1)), int(hunk.group(2) or 1)
+                start = int(hunk.group(3))
+                length = int(hunk.group(4) or 1)
                 new_line = start
                 files[path]["ranges"].append((start, start + max(length, 1) - 1))
+                files[path]["trunk"].append((old, old + max(old_length, 1) - 1))
             continue
         if path is None:
             continue
@@ -662,6 +665,11 @@ FIX_WORDS_RE = re.compile(r"flak|deflake|intermittent|\brace\b|re-?enable|stabil
 # What a Maven log says failed: a test class, or a plugin goal on a module.
 # Surefire's own goal failure only repeats the tests, so it is left out.
 TEST_FAILURE_RE = re.compile(r"<<< (?:FAILURE|ERROR)! -- in ([\w.$]+)")
+# One failed test method, and the test sources its stack trace runs through:
+# a test can fail in code it inherits ('TestFederationWebApp' fails inside
+# 'TestRouterWebServicesREST.java'), so its own file name is not enough.
+METHOD_FAILURE_RE = re.compile(r"\[ERROR\] ([\w.$]+)\.\w+ -- Time elapsed.*<<< (?:FAILURE|ERROR)!")
+TEST_FRAME_RE = re.compile(r"^\s*at [\w.$<>]+\(((?:Test\w*|\w+Test)\.java:\d+)\)")
 GOAL_FAILURE_RE = re.compile(r"Failed to execute goal ([\w.-]+):([\w.-]+):[\w.-]+:[\w-]+ "
                              r"\([\w.-]+\) on project ([\w.-]+)")
 TEST_PLUGINS = ("maven-surefire-plugin", "maven-failsafe-plugin")
@@ -729,19 +737,37 @@ def disk_cached(name: str, compute) -> Any:
     return value
 
 
-def log_failures(text: str) -> dict[str, list]:
-    """Failed test classes and failed non-test plugin goals in a Maven log."""
-    tests = {re.sub(r"^org\.apache\.", "", t.split("$")[0]) for t in TEST_FAILURE_RE.findall(text)}
+def log_failures(text: str) -> dict[str, Any]:
+    """Failed test classes, the test lines their stack traces run through
+    ('TestRouterWebServicesREST.java:712'), and failed non-test plugin goals
+    in a Maven log."""
+    def name(test: str) -> str:
+        return re.sub(r"^org\.apache\.", "", test.split("$")[0])
+    tests = {name(t) for t in TEST_FAILURE_RE.findall(text)}
+    frames: dict[str, set[str]] = {}
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        method = METHOD_FAILURE_RE.search(line)
+        if not method:
+            continue
+        files = frames.setdefault(name(method.group(1)), set())
+        for after in lines[i + 1: i + 80]:
+            if "[ERROR]" in after or "[INFO]" in after or "[WARNING]" in after:
+                break
+            if frame := TEST_FRAME_RE.match(after):
+                files.add(frame.group(1))
     goals = {(plugin, project) for _, plugin, project in GOAL_FAILURE_RE.findall(text)
              if plugin not in TEST_PLUGINS}
-    return {"tests": sorted(tests), "goals": [list(g) for g in sorted(goals)]}
+    return {"tests": sorted(tests | set(frames)),
+            "frames": {test: sorted(files) for test, files in sorted(frames.items())},
+            "goals": [list(g) for g in sorted(goals)]}
 
 
-def build_log_failures(url: str, token: str | None = None) -> dict[str, list] | None:
-    def compute() -> dict[str, list] | None:
+def build_log_failures(url: str, token: str | None = None) -> dict[str, Any] | None:
+    def compute() -> dict[str, Any] | None:
         data = http_get(url, token)
         return log_failures(data.decode("utf-8", "replace")) if data else None
-    return disk_cached(f"log-{url}", compute)
+    return disk_cached(f"log-{url}-frames2", compute)  # the end of the name is the key
 
 
 # A row of a Yetus console report (console.txt, console-report.txt):
@@ -924,7 +950,9 @@ def parse_ci_failures(pr: dict[str, Any], token: str | None = None) -> list[dict
 
     Kept: warnings Yetus attributes to trunk ('... in trunk has 1 extant
     spotbugs warnings', any '/branch-' report), tests that failed although the
-    PR does not touch them, plugin goals that failed on a module the PR does
+    PR does not touch them (nor the test files their stack traces run
+    through, read from the latest Jenkins unit logs), plugin goals that
+    failed on a module the PR does
     not touch (read from the newest Jenkins unit log), the tests that failed in
     the GitHub Actions runs of the head branch, and check annotations on files
     the PR does not change. Dropped: what the patch itself introduced, and
@@ -962,7 +990,8 @@ def parse_ci_failures(pr: dict[str, Any], token: str | None = None) -> list[dict
              if (((c.get("author") or {}) or {}).get("login") or "").lower() in bots
              and "overall" in (c.get("body") or "")]
     newest = max((c.get("createdAt") or "" for c in yetus), default="")
-    unit_log = ("", "")
+    unit_logs: list[tuple[str, str]] = []   # (Yetus comment time, its unit log)
+    table_tests: dict[str, set[str]] = {}
     for comment in yetus:
         when = comment.get("createdAt") or ""
         current = when == newest
@@ -972,6 +1001,7 @@ def parse_ci_failures(pr: dict[str, Any], token: str | None = None) -> list[dict
             if tests and (tests.group(1) or in_tests):
                 in_tests = True
                 test = tests.group(2)
+                table_tests.setdefault(when, set()).add(test)
                 if f"{test.rsplit('.', 1)[-1]}.java" not in own_names:
                     record(("unit", test), when, current, "precommit", subsystem="unit",
                            test=test, detail=f"{test.rsplit('.', 1)[-1]} failed")
@@ -985,8 +1015,8 @@ def parse_ci_failures(pr: dict[str, Any], token: str | None = None) -> list[dict
             subsystem, note = cells[1].lower(), cells[-1]
             report = re.search(r"\((https?://[^)\s]+)\)", cells[3])
             report_url = report.group(1) if report else ""
-            if subsystem == "unit" and report_url and when >= unit_log[0]:
-                unit_log = (when, report_url)
+            if subsystem == "unit" and report_url:
+                unit_logs.append((when, report_url))
             if subsystem in ("patch", "unit") or "does not apply" in note:
                 continue  # unit failures are recorded test by test above
             from_trunk = "/branch-" in report_url or f" in {BASE}" in note
@@ -1000,13 +1030,31 @@ def parse_ci_failures(pr: dict[str, Any], token: str | None = None) -> list[dict
                    subsystem=subsystem, module=module_path, report=report_url,
                    detail=f"{subsystem} on {module_path or 'the build'} ({BASE})")
 
-    # 'root in the patch failed' can hide a plugin that broke on some module
-    # (a Jasmine run, an enforcer rule): the newest unit log names it.
-    if unit_log[1] and unit_log[0] == newest:
-        for plugin, project in (build_log_failures(unit_log[1]) or {}).get("goals", []):
+    # The unit logs of the latest runs: the test files each failure's stack
+    # trace runs through, and failed tests the Yetus table left out. A log
+    # Jenkins no longer keeps leaves the table as it is.
+    own_failures = set()
+    for when, url in sorted(set(unit_logs), reverse=True)[:CI_REPORTS_PER_PR]:
+        log = build_log_failures(url) or {}
+        for test in log.get("tests", []):
+            frames = log.get("frames", {}).get(test, [])
+            simple = test.rsplit(".", 1)[-1]
+            if own_names & {f"{simple}.java", *(f.split(":")[0] for f in frames)}:
+                own_failures.add(("unit", test))  # it fails in code the PR edits
+                continue
+            if test not in table_tests.get(when, ()):
+                record(("unit", test), when, when == newest, "precommit", subsystem="unit",
+                       test=test, detail=f"{simple} failed")
+            entry = found[("unit", test)]
+            entry["frames"] = sorted(set(entry.get("frames", [])) | set(frames))
+        # 'root in the patch failed' can hide a plugin that broke on some module
+        # (a Jasmine run, an enforcer rule): the newest unit log names it.
+        for plugin, project in log.get("goals", []) if when == newest else []:
             if not touched(project):
                 record(("build", project), newest, True, "precommit", subsystem="build",
                        project=project, plugin=plugin, detail=f"{plugin} fails on {project}")
+    for key in own_failures:
+        found.pop(key, None)
 
     # The GitHub Actions history of the head branch.
     head_repo = ((pr.get("headRepository") or {}) or {}).get("nameWithOwner") or ""
@@ -1114,12 +1162,36 @@ def _plugin_word(plugin: str) -> str:
     return re.sub(r"^maven-|-maven-plugin$|-plugin$", "", plugin)
 
 
+def _frame_hit(frames: list[str], paths: list[str],
+               diff: Callable[[], dict[str, dict[str, Any]]] | None) -> str | None:
+    """A hunk of this change over a trunk line a failing stack trace runs through."""
+    lines: dict[str, list[int]] = {}
+    for frame in frames:
+        name, _, line = frame.partition(":")
+        lines.setdefault(name, []).append(int(line))
+    touched = [p for p in paths if os.path.basename(p) in lines]
+    if not touched or diff is None:
+        return None
+    hunks = diff()  # fetched only now: most failures have no frame in these files
+    for path in touched:
+        name = os.path.basename(path)
+        for start, end in (hunks.get(path) or {}).get("trunk", []):
+            for line in lines[name]:
+                if start <= line <= end:
+                    return f"it edits {name}:{start}-{end}, where %s fails at line {line}"
+    return None
+
+
 def ci_fix_match(failures: list[dict[str, Any]], paths: list[str],
-                 title: str, body: str = "") -> dict[str, Any] | None:
+                 title: str, body: str = "",
+                 diff: Callable[[], dict[str, dict[str, Any]]] | None = None
+                 ) -> dict[str, Any] | None:
     """Does a change with these files, title and description clear one of the failures?
 
     Returns {'strength': 'strong'|'medium'|'weak', 'reason': ...} for the best
-    match. Strong: it edits the failing test, the class spotbugs names, a file
+    match. Strong: it edits the failing test, or (given `diff`, called only
+    when needed) the trunk lines its stack trace runs through in another test
+    file (a parent class), the class spotbugs names, a file
     a check annotated, or the module whose plugin run fails while naming that
     plugin in its title; or it names the
     check and edits the failing module; or its description names the failing
@@ -1170,8 +1242,14 @@ def ci_fix_match(failures: list[dict[str, Any]], paths: list[str],
             in_title = simple.lower() in lowered
             in_body = bool(body) and re.search(rf"\b{re.escape(simple)}\b", body) is not None
             project = _project_of_test(test)
-            if any(p.endswith(f"/{simple}.java") for p in paths) or in_title:
+            # A change that edits a file the stack trace runs through is judged
+            # by its lines: editing (or naming) the test elsewhere is no fix.
+            frame_files = {f.split(":")[0] for f in failure.get("frames") or []}
+            by_line = diff is not None and any(os.path.basename(p) in frame_files for p in paths)
+            if not by_line and (in_title or any(p.endswith(f"/{simple}.java") for p in paths)):
                 offer("strong", f"it fixes {simple}, which fails in {where}{when}", in_title)
+            elif hit := _frame_hit(failure.get("frames") or [], paths, diff):
+                offer("strong", f"{hit % simple} in {where}{when}")
             elif simple.startswith("Test") and any(
                     p.endswith(f"{package}/{simple[4:]}.java") for p in paths):
                 offer("medium", f"it changes {simple[4:]}, the class {simple} tests; "
@@ -1564,7 +1642,8 @@ def existing_fixes(failure: dict[str, Any], repo: str, token: str | None, jira_b
             if node.get("state") == "CLOSED" or (node.get("state") == "MERGED" and merged < since):
                 continue
             paths = [f["path"] for f in ((node.get("files") or {}).get("nodes") or [])]
-            match = ci_fix_match([failure], paths, node.get("title") or "", node.get("body") or "")
+            match = ci_fix_match([failure], paths, node.get("title") or "", node.get("body") or "",
+                                 lambda n=number: pr_diff(repo, n, token))
             if match and match["strength"] in ("strong", "medium"):
                 key = JIRA_IN_TEXT_RE.match((node.get("title") or "").strip())
                 verdict, evidence = yetus_verdict(failure, yetus_reports(node))
@@ -1904,7 +1983,8 @@ def collect_dependencies(
             if not entry.get("number"):
                 continue
             found = [ci_fix_match(failures, entry.get("files") or [], entry.get("title") or "",
-                                  entry.get("body") or "")
+                                  entry.get("body") or "",
+                                  lambda n=entry["number"]: pr_diff(repo, n, token))
                      for failures in (own_ci, [f for f in inherited if f["via"] != entry["ref"]])
                      if failures]
             found = [m for m in found if m]
@@ -1913,7 +1993,7 @@ def collect_dependencies(
         for entry in blocks.values():
             if entry.get("number"):
                 match = ci_fix_match(fetch_ci_failures(repo, entry["number"], token),
-                                     own_files, own_title, own_body)
+                                     own_files, own_title, own_body, lambda: self_diff)
                 if match:
                     match["reason"] = match["reason"].replace("this PR", "that PR")
                     entry["ci"] = match
@@ -1931,7 +2011,8 @@ def collect_dependencies(
             peer_paths = [f["path"] for f in ((peer.get("files") or {}).get("nodes") or [])]
             if reference not in depends and own_ci:
                 match = ci_fix_match(own_ci, peer_paths, peer.get("title") or "",
-                                     peer.get("body") or "")
+                                     peer.get("body") or "",
+                                     lambda n=peer["number"]: pr_diff(repo, n, token))
                 if match and match["strength"] == "strong" and match["current"]:
                     add_dependency(depends, reference, match["reason"], peer, source="ci")
                     depends[reference].update(
@@ -1940,7 +2021,7 @@ def collect_dependencies(
                     )
             if reference not in blocks:
                 match = ci_fix_match(fetch_ci_failures(repo, peer["number"], token),
-                                     own_files, own_title, own_body)
+                                     own_files, own_title, own_body, lambda: self_diff)
                 if match and match["strength"] == "strong" and match["current"]:
                     match["reason"] = match["reason"].replace("this PR", "that PR")
                     add_dependency(blocks, reference, match["reason"], peer, source="ci")
@@ -1952,11 +2033,13 @@ def collect_dependencies(
         # Still red, and none of the author's PRs clears it: somebody else's
         # PR may, a JIRA may track it, or it needs a JIRA.
         if search_external:
-            fixers = [(e.get("files") or [], e.get("title") or "", e.get("body") or "")
+            fixers = [(e.get("files") or [], e.get("title") or "", e.get("body") or "",
+                       lambda n=e["number"]: pr_diff(repo, n, token))
                       for e in depends.values() if e.get("number")]
             fixers += [([f["path"] for f in ((p.get("files") or {}).get("nodes") or [])],
-                        p.get("title") or "", p.get("body") or "") for p in peers]
-            fixers.append((own_files, own_title, own_body))  # a PR that clears its own -1
+                        p.get("title") or "", p.get("body") or "",
+                        lambda n=p["number"]: pr_diff(repo, n, token)) for p in peers]
+            fixers.append((own_files, own_title, own_body, lambda: self_diff))  # a PR that clears its own -1
             skip_numbers = {self_number} | {e["number"] for e in depends.values() if e.get("number")}
             skip_keys = {k for k in [self_key] + [e.get("jira") for e in depends.values()] if k}
             for failure in [f for f in own_ci if f.get("current")]:

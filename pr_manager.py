@@ -100,7 +100,6 @@ class PlanItem:
 @dataclass
 class PlanOptions:
     search_external: bool = True
-    include_weak: bool = False
     jira_only: bool = False
     pr_only: bool = False
 
@@ -271,8 +270,6 @@ class PRManager(App):
                 with Horizontal(id="options"):
                     yield Checkbox("search others' PRs and JIRA", self.options.search_external,
                                    id="opt-search")
-                    yield Checkbox("offer WEAK link deletions", self.options.include_weak,
-                                   id="opt-weak")
                     yield Checkbox("JIRA only", self.options.jira_only, id="opt-jira")
                     yield Checkbox("PR descriptions only", self.options.pr_only, id="opt-pr")
                 with Horizontal(id="plan-top"):
@@ -502,7 +499,7 @@ class PRManager(App):
         try:
             me = fd.viewer_login(s.token) or s.author
             plans = fd.plan_all([fd.Target(b.pr, b.jira, b.deps) for b in bundles],
-                                s.repo, s.jira_base, s.token, o.include_weak, o.jira_only,
+                                s.repo, s.jira_base, s.token, o.jira_only,
                                 o.pr_only, me)
         except (Exception, SystemExit) as exc:
             notes.append(f"planning failed: {exc}")
@@ -641,7 +638,7 @@ class PRManager(App):
 
     @on(Checkbox.Changed)
     def option_changed(self, event: Checkbox.Changed) -> None:
-        name = {"opt-search": "search_external", "opt-weak": "include_weak",
+        name = {"opt-search": "search_external",
                 "opt-jira": "jira_only", "opt-pr": "pr_only"}[event.checkbox.id]
         setattr(self.options, name, event.value)
         if self.plan_scope:

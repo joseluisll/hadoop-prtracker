@@ -9,10 +9,11 @@ concrete changes:
 * add a JIRA 'is blocked by' link for a CONFIRMED, CI-FIX (the other PR
   clears a Yetus -1 or a red GitHub Actions run of this one) or DISCOVERED
   dependency that nobody has recorded yet, in either direction;
-* delete a JIRA link the diffs do not support (UNSUPPORTED, or WEAK with
-  --include-weak), or whose CI failure is gone (STALE: not seen for
-  --stale-days days, 30 by default, absent from the latest run, and with a
-  green run of that check since);
+* delete a JIRA link that is recorded but no longer planned: the diffs do not
+  support it (WEAK, UNSUPPORTED), or its CI failure is gone (STALE: not seen
+  for --stale-days days, 30 by default, absent from the latest run, and with
+  a green run of that check since). LIKELY and UNVERIFIED links, links to
+  resolved issues and pairs another PR of the run still plans are kept;
 * rewrite the dependency block of the pull request description - 'Depends
   on' and 'Required by' - so it matches what the code actually shows.
 
@@ -71,9 +72,9 @@ from list_upstream_prs import fetch, join, resolve_token
 BLOCKER_LINK_TYPE = "Blocker"
 BLOCK_START, BLOCK_END = core.BLOCK_START, core.BLOCK_END
 
-# Verdicts good enough to write down, and those worth deleting.
+# Verdicts good enough to write down, and those worth deleting once recorded.
 WORTH_DECLARING = ("CONFIRMED", "CI-FIX", "DISCOVERED")
-WORTH_DELETING = ("UNSUPPORTED", "STALE")
+WORTH_DELETING = ("WEAK", "UNSUPPORTED", "STALE")
 
 
 # --------------------------------------------------------------------------- #
@@ -304,23 +305,24 @@ def link_add(jira_base: str, blocker: str, blocked: str, reference: str,
 
 def plan_for(
     pr: dict[str, Any], jira: core.Jira | None, deps: dict[str, Any],
-    repo: str, jira_base: str, token: str | None, include_weak: bool,
+    repo: str, jira_base: str, token: str | None,
     jira_only: bool, pr_only: bool, me: str | None = None,
     extra: dict[str, list[dict[str, Any]]] | None = None,
     keep: dict[frozenset[str], str] | None = None,
     analysed: set[int] | None = None,
 ) -> tuple[list[Change], list[str]]:
     """The changes for one PR. `extra` adds what other PRs of the run say of it,
-    `keep` the JIRA pairs one of them still supports (see `supported_pairs`)."""
+    `keep` the JIRA pairs one of them still plans (see `supported_pairs`)."""
     changes: list[Change] = []
     number = pr["number"]
     key = jira.key if jira and jira.found else None
     depends, required, notes = solid_lists(Target(pr, jira, deps))
+    # Recorded but not planned: what JIRA links that this plan would not write.
+    planned = {jira_key_of(e) for e in depends + required}
     removable = [
         e for e in deps.get("depends_on", []) + deps.get("blocks", [])
-        if "jira" in e.get("sources", [])
-        and (e.get("verdict") in WORTH_DELETING
-             or (include_weak and e.get("verdict") == "WEAK"))
+        if "jira" in e.get("sources", []) and e.get("verdict") in WORTH_DELETING
+        and jira_key_of(e) not in planned
     ]
 
     # ----- JIRA: links to add ------------------------------------------------ #
@@ -348,7 +350,7 @@ def plan_for(
             other = jira_key_of(entry) or entry.get("jira")
             link = (has_blocking_link(jira, other) or has_blocked_link(jira, other)) \
                 if other else None
-            if not link or not link.get("id"):
+            if not link or not link.get("id") or link.get("resolution"):
                 continue
             # One link serves both issues: the other side may see what this
             # one does not (a -1 it inherits from a branch it is stacked on).
@@ -406,16 +408,18 @@ def plan_for(
         for section, entries in (("depends", depends), ("required", required)):
             known = {e["ref"] for e in entries}
             entries += [e for e in (extra or {}).get(section, []) if e["ref"] not in known]
-        body = pr.get("body") or ""
+        # A description edited in the GitHub web UI comes back with CRLF endings.
+        body = (pr.get("body") or "").replace("\r\n", "\n")
         block = build_block(depends, required)
         new_body = apply_block(body, block)
         if new_body.strip() != body.strip():
             evidence = [f"needs {e['ref']}: {e.get('verdict_reason', '')}" for e in depends]
             evidence += [f"{e['ref']} waits for it: {e.get('verdict_reason', '')}"
                          for e in required]
-            evidence += [f"drops {e['ref']}: {e.get('verdict_reason', '')}"
+            kept_refs = {e["ref"] for e in depends + required}
+            evidence += [f"drops {e['ref']} [{e.get('verdict')}]: {e.get('verdict_reason', '')}"
                          for e in deps.get("depends_on", []) + deps.get("blocks", [])
-                         if "block" in e.get("sources", []) and e.get("verdict") == "STALE"]
+                         if "block" in e.get("sources", []) and e["ref"] not in kept_refs]
             stale = [e["ref"] for e in deps.get("depends_on", [])
                      if "text" in e.get("sources", []) and e.get("verdict") == "UNSUPPORTED"]
             if stale:
@@ -456,11 +460,11 @@ def as_entry(target: Target, like: dict[str, Any]) -> dict[str, Any]:
             "verdict_reason": like.get("verdict_reason", ""), "mutual": like.get("mutual")}
 
 
-def supported_pairs(targets: list[Target], include_weak: bool) -> dict[frozenset[str], str]:
-    """The JIRA pairs some PR of the run still backs, with who and why.
+def supported_pairs(targets: list[Target]) -> dict[frozenset[str], str]:
+    """The JIRA pairs some PR of the run still plans, with who and why.
 
     A link is one object shared by two issues, so it is proposed for deletion
-    only when no side analysed in this run supports it.
+    only when no side analysed in this run plans it.
     """
     kept: dict[frozenset[str], str] = {}
     for target in targets:
@@ -470,7 +474,7 @@ def supported_pairs(targets: list[Target], include_weak: bool) -> dict[frozenset
         for entry in target.deps.get("depends_on", []) + target.deps.get("blocks", []):
             other = jira_key_of(entry) or entry.get("jira")
             verdict = entry.get("verdict")
-            if not other or not verdict or verdict in WORTH_DELETING                     or (include_weak and verdict == "WEAK") or verdict == "UNVERIFIED":
+            if not other or verdict not in WORTH_DECLARING:
                 continue
             kept.setdefault(frozenset((jira.key, other)),
                             f"#{target.pr['number']} judges it {verdict} - "
@@ -480,7 +484,7 @@ def supported_pairs(targets: list[Target], include_weak: bool) -> dict[frozenset
 
 def plan_all(
     targets: list[Target], repo: str, jira_base: str, token: str | None,
-    include_weak: bool, jira_only: bool, pr_only: bool, me: str | None,
+    jira_only: bool, pr_only: bool, me: str | None,
 ) -> list[tuple[int, list[Change], list[str]]]:
     """Plan every PR of a run, each write of it proposed once.
 
@@ -490,7 +494,7 @@ def plan_all(
     JIRA only once, since one link shows on both issues.
     """
     in_run = {t.pr["number"]: t for t in targets}
-    keep = supported_pairs(targets, include_weak)
+    keep = supported_pairs(targets)
     extra: dict[int, dict[str, list[dict[str, Any]]]] = {
         n: {"depends": [], "required": []} for n in in_run}
     outside: dict[str, Change] = {}
@@ -535,7 +539,7 @@ def plan_all(
     for target in targets:
         number = target.pr["number"]
         changes, notes = plan_for(target.pr, target.jira, target.deps, repo, jira_base, token,
-                                  include_weak, jira_only, pr_only, me, extra[number], keep,
+                                  jira_only, pr_only, me, extra[number], keep,
                                   set(in_run))
         changes += [c for k, c in outside.items() if origin[k] == number]
         kept = []
@@ -625,8 +629,9 @@ def update_pr_body(repo: str, number: int, edit: Callable[[str], str],
     if me and owner.lower() != me.lower():
         return False, (f"#{number} was opened by {owner}, not by {me}: its description is "
                        f"theirs to edit - nothing written")
-    body = edit(payload.get("body") or "")
-    if body.strip() == (payload.get("body") or "").strip():
+    current = (payload.get("body") or "").replace("\r\n", "\n")
+    body = edit(current)
+    if body.strip() == current.strip():
         return True, f"description of #{number} was already up to date"
     status, payload = request_json(
         url, token, "PATCH", {"body": body}, accept="application/vnd.github+json"
@@ -793,8 +798,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="a CI fix is STALE once its failure has not been seen for this "
                              "many days and a run of that check was green since "
                              "(default: %(default)s)")
-    parser.add_argument("--include-weak", action="store_true",
-                        help="also offer to delete links whose verdict is only WEAK")
     parser.add_argument("--no-ci-search", action="store_true",
                         help="do not look for PRs of others or JIRA issues for the failures "
                              "none of your PRs clears")
@@ -860,7 +863,7 @@ def main(argv: list[str] | None = None) -> int:
     me = viewer_login(token) or args.all_open or core.DEFAULT_AUTHOR
     for target, (number, found, notes) in zip(planned, plan_all(
             planned, args.repo, args.jira_base, token,
-            args.include_weak, args.jira_only, args.pr_only, me)):
+            args.jira_only, args.pr_only, me)):
         jira = target.jira
         label = jira.key if jira and jira.found else "no JIRA"
         print(f"#{number} {label}: {len(found)} change(s) proposed")
