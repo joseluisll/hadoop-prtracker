@@ -303,6 +303,8 @@ try:
     stage = {"job": "jdk21-hadoop3", "number": 2, "url": "u", "date": "2026-10-03", "commits": [],
              "voted": ["unit"], "comments": {}, "cases": {}, "warnings": {}, "tests": log["tests"],
              "logs": {"root": log | {"url": "https://ci/patch-unit-root.txt"}}, "unit_modules": ["root"]}
+    stage["flaky"] = q.flaky_tests(stage, [])
+    assert stage["flaky"] == ["hadoop.hbase.master.TestSCP"]
     clean = {**stage, "number": 1, "voted": [], "tests": [], "logs": {}, "unit_modules": []}
     staged = {(c["kind"], c["module"]): c for c in q.build_candidates({"jdk21-hadoop3": [stage, clean]}, {}, False)}
     fork = staged[("build", "hbase-server")]
@@ -311,7 +313,11 @@ try:
     assert q.core.failure_words(fork["record"]) == [["surefire", "timeout"], ["surefire", "timed out"]]
     q.history(fork, {"jdk21-hadoop3": [stage, clean]})
     assert fork["history"]["jdk21-hadoop3"]["failed"] == 1, fork["history"]
-    assert ("test", "root") in staged and q.vote_of(clean) == "+1" and q.vote_of(stage) == "-1 unit"
+    scp = staged[("test", "root")]
+    q.history(scp, {"jdk21-hadoop3": [stage, clean]})
+    assert scp["flaky"] and q.what_line(scp).endswith("(flaky: passed on rerun)")
+    assert q.summary_of(scp, 1) == ("HBASE", "TestSCP is flaky on master"), q.summary_of(scp, 1)
+    assert q.vote_of(clean) == "+1" and q.vote_of(stage) == "-1 unit"
 finally:
     q.core.use_profile("hadoop")
 assert q.core.new_jira_summary({"test": "hadoop.yarn.TestX"}) == "YARN: TestX fails on trunk"

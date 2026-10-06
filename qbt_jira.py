@@ -300,6 +300,7 @@ def read_build(job: str, build: dict[str, Any], latest: bool) -> dict[str, Any] 
         record["logs"][module_of_log(log)] = (core.build_log_failures(log) or {}) | {"url": log}
     record["cases"] = core.disk_cached(f"qbt-tests-{job}-{build['number']}",
                                        lambda: failed_cases(url)) or {}
+    record["flaky"] = flaky_tests(record, record["tests"])
     return record
 
 
@@ -364,6 +365,7 @@ def staged_runs(jenkins: str, job: str, history: int, build: int | None,
                     record["logs"][module_of_log(unit_log)] = \
                         (core.build_log_failures(unit_log) or {}) | {"url": unit_log}
             record["unit_modules"] = list(record["logs"])
+            record["flaky"] = flaky_tests(record, [])
             record["tests"] = list(dict.fromkeys(list(record["cases"]) + [
                 t for log in record["logs"].values() for t in log.get("tests", [])]))
             extant = [core.YETUS_EXTANT_RE.search(c) for c in record["comments"].get("spotbugs", [])]
@@ -380,6 +382,13 @@ def staged_runs(jenkins: str, job: str, history: int, build: int | None,
         log(f"{stage} #{records[0]['number']} ({records[0]['date']}): "
             f"{vote_of(records[0])}; {len(records)} build(s) read")
     return runs
+
+
+def flaky_tests(record: dict[str, Any], reported: list[str]) -> list[str]:
+    """Tests a unit log shows failing that neither the report nor the test
+    report counts as failed: a rerun passed them."""
+    return [t for log in record["logs"].values() for t in log.get("tests", [])
+            if t not in reported and t not in record["cases"]]
 
 
 def vote_of(record: dict[str, Any]) -> str:
@@ -462,8 +471,11 @@ def build_candidates(runs: dict[str, list[dict[str, Any]]], sources: dict[str, s
         test_module = {t: m for m, log in latest["logs"].items() for t in log.get("tests", [])}
         for test in dict.fromkeys(latest["tests"] + list(test_module)):
             module = test_module.get(test, "")
-            entry = add(("test", test), job, test=test, module=module, methods={}, logs=[])
+            entry = add(("test", test), job, test=test, module=module, methods={}, logs=[],
+                        flaky=True)
             entry["module"] = entry["module"] or module
+            # Flaky only while every job that shows it passed it on a rerun.
+            entry["flaky"] = entry["flaky"] and test in latest.get("flaky", [])
             for case in latest["cases"].get(test, []):
                 entry["methods"].setdefault(case["name"], case)
             if module and latest["logs"][module]["url"] not in entry["logs"]:
@@ -841,7 +853,7 @@ def score(entry: dict[str, Any]) -> tuple[int, str, list[tuple[int, str]]]:
         add(POINTS["kind_build"], f"{entry['plugin']} {'times out' if entry.get('timeout') else 'fails'}, so the unit run of "
                                   f"{entry['artifact']} is -1 for every PR that touches it")
     elif kind == "test":
-        add(POINTS["kind_test"], "a unit test fails")
+        add(POINTS["kind_test"], "a unit test fails" + (", then passes on rerun" if entry.get("flaky") else ""))
     elif kind == "spotbugs":
         bugs = [w for w in entry["warnings"].values() if w["category"] in BUG_CATEGORIES]
         if bugs:
@@ -894,7 +906,8 @@ def summary_of(entry: dict[str, Any], jobs_read: int) -> tuple[str, str]:
         return core.DEFAULT_PROJECT, f"Fix the {entry['subsystem']} -1 of the {nightly()}"
     if kind == "test":
         project = project_key(entry["module"], entry["test"])
-        summary = f"{entry['test'].rsplit('.', 1)[-1]} fails on {core.BASE}"
+        summary = (f"{entry['test'].rsplit('.', 1)[-1]} "
+                   f"{'is flaky' if entry.get('flaky') else 'fails'} on {core.BASE}")
     else:
         project, _, summary = core.new_jira_summary(entry["record"]).partition(": ")
         classes = entry["record"].get("classes") or {}
@@ -913,13 +926,17 @@ def describe(entry: dict[str, Any], runs: dict[str, list[dict[str, Any]]]) -> st
     lines: list[str] = []
     kind = entry["kind"]
     if kind == "test":
-        lines.append(f"{{{{{entry['test']}}}}} fails in the {nightly()}"
-                     + (f", module {{{{{entry['module']}}}}}" if entry["module"] else "") + ":")
+        lines.append(f"{{{{{entry['test']}}}}} {'is flaky' if entry.get('flaky') else 'fails'} "
+                     f"in the {nightly()}"
+                     + (f", module {{{{{entry['module']}}}}}" if entry["module"] else "")
+                     + (": it fails, then passes when surefire runs it again." if entry.get("flaky")
+                        else ":"))
         lines.append("")
         for name, case in list(entry["methods"].items())[:8]:
             lines.append(f"* {{{{{name}}}}}: {case['error'] or 'no message'}")
         if not entry["methods"]:
-            lines.append("* (the test report names no method; see the unit log)")
+            lines.append("* (the test report names no method; see the unit log)" if not entry.get("flaky")
+                         else "* (the test report counts the rerun that passed; see the unit log)")
     elif kind == "build" and entry.get("timeout"):
         lines.append(f"{{{{{entry['plugin']}}}}} times out in a test fork on {{{{{entry['module']}}}}} "
                      f"in the {nightly()}, so the unit run of that module is -1.")
@@ -979,7 +996,8 @@ def what_line(entry: dict[str, Any]) -> str:
     if kind == "test":
         methods = list(entry["methods"])
         return (f"{entry['test']}" + (f" in {entry['module']}" if entry["module"] else "")
-                + (f": {join(methods, 3)}" if methods else ""))
+                + (f": {join(methods, 3)}" if methods else "")
+                + (" (flaky: passed on rerun)" if entry.get("flaky") else ""))
     if kind == "build":
         return f"{entry['plugin']} {'times out' if entry.get('timeout') else 'fails'} on {entry['module']}"
     if kind == "spotbugs":
