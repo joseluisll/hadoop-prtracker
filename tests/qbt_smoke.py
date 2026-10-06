@@ -294,6 +294,24 @@ try:
     assert q.core.console_rows(ACTIONS) == [
         ("-0", "checkstyle", "hbase-server: The patch generated 3 new + 0 unchanged - 0 fixed = 3 total (was 0)"),
         ("-1", "spotbugs", "hbase-server generated 6 new + 0 unchanged - 0 fixed = 6 total (was 0)")]
+    # The whole-tree unit log of HBase Nightly: a flaky test the rerun passed, and a fork timeout.
+    UNIT = """[ERROR] Tests run: 1, Failures: 0, Errors: 1, Skipped: 0, Time elapsed: 780.1 s <<< FAILURE! -- in org.apache.hadoop.hbase.master.TestSCP
+[ERROR] Failed to execute goal org.apache.maven.plugins:maven-surefire-plugin:3.5.3:test (secondPartTestsExecution) on project hbase-server: There was a timeout in the fork -> [Help 1]"""
+    log = q.core.log_failures(UNIT)
+    assert log["tests"] == ["hadoop.hbase.master.TestSCP"] and log["goals"] == [], log
+    assert log["timeouts"] == [["maven-surefire-plugin", "hbase-server"]], log
+    stage = {"job": "jdk21-hadoop3", "number": 2, "url": "u", "date": "2026-10-03", "commits": [],
+             "voted": ["unit"], "comments": {}, "cases": {}, "warnings": {}, "tests": log["tests"],
+             "logs": {"root": log | {"url": "https://ci/patch-unit-root.txt"}}, "unit_modules": ["root"]}
+    clean = {**stage, "number": 1, "voted": [], "tests": [], "logs": {}, "unit_modules": []}
+    staged = {(c["kind"], c["module"]): c for c in q.build_candidates({"jdk21-hadoop3": [stage, clean]}, {}, False)}
+    fork = staged[("build", "hbase-server")]
+    assert fork["timeout"] and q.what_line(fork) == "maven-surefire-plugin times out on hbase-server"
+    assert q.core.new_jira_summary(fork["record"]) == "HBASE: maven-surefire-plugin times out in a fork on hbase-server"
+    assert q.core.failure_words(fork["record"]) == [["surefire", "timeout"], ["surefire", "timed out"]]
+    q.history(fork, {"jdk21-hadoop3": [stage, clean]})
+    assert fork["history"]["jdk21-hadoop3"]["failed"] == 1, fork["history"]
+    assert ("test", "root") in staged and q.vote_of(clean) == "+1" and q.vote_of(stage) == "-1 unit"
 finally:
     q.core.use_profile("hadoop")
 assert q.core.new_jira_summary({"test": "hadoop.yarn.TestX"}) == "YARN: TestX fails on trunk"
