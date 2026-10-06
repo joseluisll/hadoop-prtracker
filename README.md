@@ -29,7 +29,7 @@ change is shown and confirmed one by one.
 job on [ci-hadoop.apache.org](https://ci-hadoop.apache.org) (today JDK 17 and JDK 21), plus
 the builds before it (`--history`, default 7), and turns what they show into candidates:
 failing test classes, plugin goals that fail on a module (its unit vote is -1 with no test
-failing), and trunk spotbugs warnings grouped by the module whose source has them
+failing) or test forks that time out on one, and trunk spotbugs warnings grouped by the module whose source has them
 (`--include-lint` adds tree-wide -1 votes such as xml or pathlen).
 
 The output starts with every candidate **ranked by the open PRs it would help**: those whose
@@ -184,8 +184,9 @@ A zip is downloaded once (cached by artifact id); a passing unit wave's zip (up 
 test's output) is not downloaded at all. The GitHub API calls still take a few seconds per PR,
 so `review_queue.py` and `qbt_jira.py` over all open HBase PRs take a few minutes.
 
-`qbt_jira.py` gets no per-module plugin goal candidates for HBase, since its nightly runs the
-unit tests of the whole tree in one go.
+HBase's nightly runs the unit tests of the whole tree in one go, so `qbt_jira.py` puts a failed
+plugin goal or fork timeout on the project its unit log names (`hbase-server`), and also lists
+the tests that log shows failing before a rerun passed them.
 
 ## Examples
 

@@ -673,6 +673,8 @@ TEST_FRAME_RE = re.compile(r"^\s*at [\w.$<>]+\(((?:Test\w*|\w+Test)\.java:\d+)\)
 GOAL_FAILURE_RE = re.compile(r"Failed to execute goal ([\w.-]+):([\w.-]+):[\w.-]+:[\w-]+ "
                              r"\([\w.-]+\) on project ([\w.-]+)")
 TEST_PLUGINS = ("maven-surefire-plugin", "maven-failsafe-plugin")
+# A test plugin that gives up on a fork: the module is -1 whether or not a test failed.
+FORK_TIMEOUT_RE = re.compile(GOAL_FAILURE_RE.pattern + r": There was a timeout in the fork")
 ACTIONS_FAILED_RUNS = 6
 CACHE_DIR = os.path.join(tempfile.gettempdir(), "analyze_pr_cache")
 # Where the Yetus artifacts of an Actions precommit (hbase profile) are downloaded.
@@ -740,7 +742,7 @@ def disk_cached(name: str, compute) -> Any:
 def log_failures(text: str) -> dict[str, Any]:
     """Failed test classes, the test lines their stack traces run through
     ('TestRouterWebServicesREST.java:712'), and failed non-test plugin goals
-    in a Maven log."""
+    in a Maven log; timeouts: the test plugin runs that timed out in a fork."""
     def name(test: str) -> str:
         return re.sub(r"^org\.apache\.", "", test.split("$")[0])
     tests = {name(t) for t in TEST_FAILURE_RE.findall(text)}
@@ -758,16 +760,18 @@ def log_failures(text: str) -> dict[str, Any]:
                 files.add(frame.group(1))
     goals = {(plugin, project) for _, plugin, project in GOAL_FAILURE_RE.findall(text)
              if plugin not in TEST_PLUGINS}
+    timeouts = {(plugin, project) for _, plugin, project in FORK_TIMEOUT_RE.findall(text)}
     return {"tests": sorted(tests | set(frames)),
             "frames": {test: sorted(files) for test, files in sorted(frames.items())},
-            "goals": [list(g) for g in sorted(goals)]}
+            "goals": [list(g) for g in sorted(goals)],
+            "timeouts": [list(t) for t in sorted(timeouts)]}
 
 
 def build_log_failures(url: str, token: str | None = None) -> dict[str, Any] | None:
     def compute() -> dict[str, Any] | None:
         data = http_get(url, token)
         return log_failures(data.decode("utf-8", "replace")) if data else None
-    return disk_cached(f"log-{url}-frames2", compute)  # the end of the name is the key
+    return disk_cached(f"log-{url}-frames3", compute)  # the end of the name is the key
 
 
 # A row of a Yetus console report (console.txt, console-report.txt):
@@ -1415,7 +1419,10 @@ def failure_words(failure: dict[str, Any]) -> list[list[str]]:
         return [[failure["test"].rsplit(".", 1)[-1]]]
     if failure.get("project"):
         distinctive = [w for w in failure["project"].split("-") if w not in MODULE_NOISE]
-        return [[_plugin_word(failure.get("plugin") or "")] + distinctive[:1]]
+        plugin = _plugin_word(failure.get("plugin") or "")
+        if failure.get("timeout"):  # any surefire JIRA names surefire: it must name the timeout
+            return [[plugin, w] + distinctive[:1] for w in ("timeout", "timed out")]
+        return [[plugin] + distinctive[:1]]
     classes = [c.split("$")[0].rsplit(".", 1)[-1] for c in (failure.get("classes") or {})]
     if classes:
         return [[c, failure["subsystem"]] for c in dict.fromkeys(classes)][:2]
@@ -1434,7 +1441,8 @@ def new_jira_summary(failure: dict[str, Any]) -> str:
         name = failure["project"]
         project = next((v for k, v in JIRA_PROJECT_OF_TREE.items()
                         if name.startswith(k.replace("-project", ""))), DEFAULT_PROJECT)
-        return f"{project}: {failure.get('plugin')} fails on {name}"
+        fails = "times out in a fork" if failure.get("timeout") else "fails"
+        return f"{project}: {failure.get('plugin')} {fails} on {name}"
     module = failure.get("module") or ""
     project = JIRA_PROJECT_OF_TREE.get(module.split("/", 1)[0], DEFAULT_PROJECT)
     classes = failure.get("classes") or {}
