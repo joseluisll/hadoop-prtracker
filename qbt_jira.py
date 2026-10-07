@@ -480,6 +480,10 @@ def build_candidates(runs: dict[str, list[dict[str, Any]]], sources: dict[str, s
                 entry["methods"].setdefault(case["name"], case)
             if module and latest["logs"][module]["url"] not in entry["logs"]:
                 entry["logs"].append(latest["logs"][module]["url"])
+            # The test lines its stack trace runs through: a fix in a parent
+            # class (TestFederationWebApp extends TestRouterWebServicesREST) edits those.
+            frames = latest["logs"][module].get("frames", {}).get(test, []) if module else []
+            entry["frames"] = sorted(set(entry.get("frames", [])) | set(frames))
         for module, log in latest["logs"].items():
             for plugin, artifact in log.get("goals", []) + log.get("timeouts", []):
                 # A whole-tree unit run (HBase) logs as 'root': the project is the module.
@@ -533,7 +537,7 @@ def failure_record(entry: dict[str, Any]) -> dict[str, Any]:
     kind = entry["kind"]
     if kind == "test":
         return {"subsystem": "unit", "test": entry["test"], "module": entry["module"],
-                "detail": f"{entry['test'].rsplit('.', 1)[-1]} fails"}
+                "frames": entry.get("frames", []), "detail": f"{entry['test'].rsplit('.', 1)[-1]} fails"}
     if kind == "build":
         return {"subsystem": "build", "project": entry["artifact"], "plugin": entry["plugin"],
                 "timeout": entry.get("timeout", False),
