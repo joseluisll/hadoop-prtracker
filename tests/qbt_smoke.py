@@ -80,6 +80,7 @@ def build(number, tests, commits=(), latest=False):
               **report, "tests": tests}
     if latest:
         record.update(console, logs={NM: {"tests": tests, "goals": [["jasmine-maven-plugin", "nm"]],
+                                          "frames": {tests[0]: ["TestBase.java:12"]},
                                           "url": "https://ci/log"}},
                       cases={tests[0]: [{"name": "testDelete", "age": 1, "error": "boom"}]},
                       warnings={"hadoop-tools/hadoop-rumen": date_bug,
@@ -109,6 +110,12 @@ assert any(c["kind"] == "spotbugs" and c["module"] == "hadoop-tools/hadoop-distc
 
 test = candidates[("test", TEST)]
 assert test["module"] == NM and list(test["methods"]) == ["testDelete"]
+# A fix in the parent class its stack trace runs through counts as a fix of the test.
+assert test["record"]["frames"] == ["TestBase.java:12"]
+base = f"{NM}/src/test/java/TestBase.java"
+hit = q.core.ci_fix_match([test["record"]], [base], "YARN-5. Wait for it", "",
+                          lambda: {base: {"trunk": [(10, 14)]}})
+assert hit and hit["strength"] == "strong" and "TestBase.java:10-14" in hit["reason"], hit
 for c in candidates.values():
     q.history(c, runs)
 reg = test["history"]["hadoop-qbt-trunk-java17-linux-x86_64"]["regression"]
