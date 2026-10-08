@@ -1279,7 +1279,9 @@ def ci_fix_match(failures: list[dict[str, Any]], paths: list[str],
             project = _project_of_test(test)
             # A change that edits a file the stack trace runs through is judged
             # by its lines: editing (or naming) the test elsewhere is no fix.
-            frame_files = {f.split(":")[0] for f in failure.get("frames") or []}
+            # The test's own file is always in its trace: only another file (a
+            # parent class) is judged by its lines.
+            frame_files = {f.split(":")[0] for f in failure.get("frames") or []} - {f"{simple}.java"}
             by_line = diff is not None and any(os.path.basename(p) in frame_files for p in paths)
             if not by_line and (in_title or any(p.endswith(f"/{simple}.java") for p in paths)):
                 offer("strong", f"it fixes {simple}, which fails in {where}{when}", in_title)
