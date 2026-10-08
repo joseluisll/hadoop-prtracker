@@ -64,7 +64,7 @@ BRANCH_STYLE = {"STALE": "red", "CANDIDATE": "yellow", "ACTIVE": "green"}
 # In-memory caches of analyze_pr.py dropped by a refresh; the log caches on
 # disk stay, a build log never changes.
 CORE_CACHES = (core.fetch_pr_summary, core.fetch_peer_prs, core.pr_for_jira_cached, core.pr_diff,
-               core.fetch_ci_failures, core._search_prs, core._search_jira)
+               core.fetch_ci_failures, core._search_prs, core._search_jira, core.has_commit)
 
 
 @dataclass

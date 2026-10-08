@@ -801,6 +801,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--no-ci-search", action="store_true",
                         help="do not look for PRs of others or JIRA issues for the failures "
                              "none of your PRs clears")
+    parser.add_argument("--peers", choices=("author", "all"), default="author",
+                        help="compare with your open PRs (default) or with every open PR of "
+                             "the repository; only your own descriptions are edited either way")
     parser.add_argument("--repo", default=core.DEFAULT_REPO)
     parser.add_argument("--jira-base", default=core.DEFAULT_JIRA)
     parser.add_argument("--repo-path", default=None)
@@ -857,7 +860,8 @@ def main(argv: list[str] | None = None) -> int:
             continue
         deps = core.collect_dependencies(pr, jira, args.repo, token, repo_path,
                                          jira_base=args.jira_base,
-                                         search_external=not args.no_ci_search)
+                                         search_external=not args.no_ci_search,
+                                         all_peers=args.peers == "all")
         planned.append(Target(pr, jira, deps))
 
     me = viewer_login(token) or args.all_open or core.DEFAULT_AUTHOR

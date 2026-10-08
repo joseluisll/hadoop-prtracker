@@ -134,11 +134,13 @@ so treat it as a hint.
 
 ### Dependency verdicts
 
-`CONFIRMED`, `CI-FIX`, `LIKELY`, `WEAK`, `UNSUPPORTED`, `UNVERIFIED`, `DISCOVERED`, `STALE`.
+`CONFIRMED`, `CI-FIX`, `LIKELY`, `WEAK`, `UNSUPPORTED`, `UNVERIFIED`, `DISCOVERED`, `STALE`, `MERGED`, `CLOSED`.
 
 A `CI-FIX` dependency becomes `STALE` when the failure it cleared is absent from the
 latest CI run, has not been seen for `--stale-days` (default 30) days, and at least one
-green run of the same check has happened since.
+green run of the same check has happened since. A dependency on a PR that is no longer
+open is `MERGED` or `CLOSED`, whatever its evidence: it leaves the description block, and
+its JIRA link is kept as history.
 
 ## Setup
 
@@ -197,6 +199,7 @@ python analyze_pr.py 8704
 python analyze_pr.py HADOOP-19972 --format markdown
 python fix_dependencies.py --all-open
 python fix_dependencies.py 8704 --apply
+python fix_dependencies.py --all-open --peers all --pr-only
 python fix_dependencies.py --add-link MAPREDUCE-7545:HADOOP-19972 --apply
 python create_jira.py 8704
 python create_jira.py 8704 --apply --assign-me
@@ -212,6 +215,30 @@ python qbt_jira.py --save-dir proposals
 python analyze_pr.py --profile hbase 8730
 python qbt_jira.py --profile hbase
 ```
+
+`--peers all` (`analyze_pr.py`, `fix_dependencies.py`) compares a PR with every open PR of
+the repository instead of only the author's: shared files, the symbols one diff introduces and
+the other uses, and lines both edit. A CI fix by somebody else's PR is still only proposed when
+it passes the stricter search for other people's fixes (it names the spotbugs class or bug
+type, and its Yetus reports do not refute it).
+
+## Dependencies workflow
+
+[dependencies-workflow.yml](dependencies-workflow.yml) runs
+`fix_dependencies.py --all-open --peers all --pr-only --apply --force` every day, and on demand
+(Actions → PR dependencies → Run workflow, with PR numbers, and unchecking *apply* for a dry
+run). It rewrites the dependency block of your open PRs; the plan it applied is the run's
+summary. Copy it to `.github/workflows/` on the default branch of your fork of the project
+(scheduled workflows run only from there). It checks out this repository for the scripts and
+the project's base branch (latest commit only) as the clone, without which a symbol already on
+trunk looks like one another PR introduces. It needs:
+
+- the secret `PRTRACKER_TOKEN`: a classic personal access token with the `public_repo` scope.
+  Only PRs opened by its owner are edited, as with every write of `fix_dependencies.py`.
+- optionally the variables `PRTRACKER_PROFILE` (`hbase`; default `hadoop`) and `PRTRACKER_REPO`
+  (default `<fork owner>/hadoop-prtracker`).
+
+JIRA is not touched.
 
 ## Safety model
 
