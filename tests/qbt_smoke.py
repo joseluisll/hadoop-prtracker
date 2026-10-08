@@ -116,6 +116,12 @@ base = f"{NM}/src/test/java/TestBase.java"
 hit = q.core.ci_fix_match([test["record"]], [base], "YARN-5. Wait for it", "",
                           lambda: {base: {"trunk": [(10, 14)]}})
 assert hit and hit["strength"] == "strong" and "TestBase.java:10-14" in hit["reason"], hit
+# Its own file, edited away from the failing line (a race in setup), is still a fix.
+own = f"{NM}/src/test/java/TestLogAggregationService.java"
+record = {**test["record"], "frames": ["TestLogAggregationService.java:90"]}
+hit = q.core.ci_fix_match([record], [own], "YARN-6. Stub before install", "",
+                          lambda: {own: {"trunk": [(10, 14)]}})
+assert hit and hit["strength"] == "strong", hit
 for c in candidates.values():
     q.history(c, runs)
 reg = test["history"]["hadoop-qbt-trunk-java17-linux-x86_64"]["regression"]
