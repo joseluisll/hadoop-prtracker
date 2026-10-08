@@ -19,6 +19,8 @@ and the precommit history, so each dependency carries a verdict: CONFIRMED,
 CI-FIX, LIKELY, WEAK, UNSUPPORTED or UNVERIFIED, plus DISCOVERED for the ones
 the code or the CI shows and nobody declared, and STALE for a CI fix whose
 failure is gone: not seen for STALE_DAYS days, with a green run since.
+A dependency on a PR that is no longer open is MERGED or CLOSED instead,
+whatever the evidence.
 
 and prints
 
@@ -269,15 +271,29 @@ query($q: String!) {
 """
 
 # The other open PRs of the same author, used to spot stacked branches.
+PEER_FIELDS = """
+        number title url body state isDraft updatedAt author { login }
+        baseRefName headRefName headRefOid
+        files(first: 100) { nodes { path } }
+"""
 PEERS_QUERY = """
 query($q: String!) {
   search(query: $q, type: ISSUE, first: 50) {
     nodes {
-      ... on PullRequest {
-        number title url body state isDraft updatedAt author { login }
-        baseRefName headRefName headRefOid
-        files(first: 100) { nodes { path } }
-      }
+      ... on PullRequest {""" + PEER_FIELDS + """      }
+    }
+  }
+}
+"""
+
+# Every open PR of the repository (--peers all), page by page: the search API
+# stops at 1000 results, this listing does not.
+OPEN_PRS_QUERY = """
+query($owner: String!, $name: String!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(states: OPEN, first: 50, after: $after) {
+      pageInfo { hasNextPage endCursor }
+      nodes {""" + PEER_FIELDS + """      }
     }
   }
 }
@@ -455,6 +471,21 @@ def fetch_peer_prs(repo: str, author: str, token: str | None) -> list[dict[str, 
     """Every other open PR of the same author, with its files and head commit."""
     data = graphql(PEERS_QUERY, {"q": f"repo:{repo} is:pr is:open author:{author}"}, token)
     return [n for n in (data["search"]["nodes"] or []) if n]
+
+
+@functools.lru_cache(None)
+def fetch_open_prs(repo: str, token: str | None) -> list[dict[str, Any]]:
+    """Every open PR of the repository, whoever opened it, with its files and head commit."""
+    owner, _, name = repo.partition("/")
+    prs: list[dict[str, Any]] = []
+    after = None
+    while True:
+        page = graphql(OPEN_PRS_QUERY, {"owner": owner, "name": name, "after": after},
+                       token)["repository"]["pullRequests"]
+        prs += [n for n in page["nodes"] or [] if n]
+        if not page["pageInfo"]["hasNextPage"]:
+            return prs
+        after = page["pageInfo"]["endCursor"]
 
 
 @functools.lru_cache(None)
@@ -1693,6 +1724,7 @@ def git_run(repo_path: str, *args: str) -> tuple[int, str]:
     return result.returncode, (result.stdout or "").strip()
 
 
+@functools.lru_cache(None)  # every PR of a run asks about the same peers
 def has_commit(repo_path: str, sha: str | None) -> bool:
     # The ^{commit} suffix matters: 'rev-parse --verify <sha>' echoes back a
     # full sha even when the object itself is missing from this clone.
@@ -1796,6 +1828,7 @@ def add_dependency(store: dict[str, dict[str, Any]], reference: str, reason: str
         entry["number"] = data.get("number")
         entry["title"] = data.get("title", "")
         entry["state"] = data.get("state", "UNKNOWN")
+        entry["merged_at"] = (data.get("mergedAt") or "")[:10]
         entry["url"] = data.get("url", "")
         entry["body"] = data.get("body") or ""
         entry["author"] = ((data.get("author") or {}) or {}).get("login", "")
@@ -1814,8 +1847,12 @@ def collect_dependencies(
     use_diffs: bool = True,
     jira_base: str = DEFAULT_JIRA,
     search_external: bool = True,
+    all_peers: bool = False,
 ) -> dict[str, Any]:
     """Find the PRs this one needs merged first, and the ones waiting on it.
+
+    The other PRs compared are the author's open ones, or with `all_peers`
+    every open PR of the repository.
 
     Signals, in decreasing order of confidence:
 
@@ -1910,12 +1947,13 @@ def collect_dependencies(
 
     # ----- 3. stacked branches ---------------------------------------------- #
     head = (((pr.get("commits") or {}).get("nodes") or [{}])[0].get("commit") or {}).get("oid")
-    peers: list[dict[str, Any]] = []
-    if author:
-        try:
-            peers = [p for p in fetch_peer_prs(repo, author, token) if p["number"] != self_number]
-        except SystemExit:
-            peers = []
+    try:
+        found = (fetch_open_prs(repo, token) if all_peers
+                 else fetch_peer_prs(repo, author, token) if author else [])
+    except SystemExit:
+        found = []
+    peers = [p for p in found if p["number"] != self_number]
+    own_peers = [p for p in peers if ((p.get("author") or {}) or {}).get("login") == author]
 
     if repo_path and head and has_commit(repo_path, head):
         for peer in peers:
@@ -1968,7 +2006,9 @@ def collect_dependencies(
         for entry in list(depends.values()) + list(blocks.values()):
             if entry.get("number"):
                 to_check.append(entry["number"])
-        to_check += [n for n in candidates if n not in to_check]
+        # Most shared files first: only the first 8 diffs are read.
+        to_check += [n for n in sorted(candidates, key=lambda n: -len(candidates[n]))
+                     if n not in to_check]
         for number in to_check[:8]:
             peer = peer_by_number.get(number) or fetch_pr_summary(repo, number, token) or {}
             peer_paths = [f["path"] for f in ((peer.get("files") or {}).get("nodes") or [])]
@@ -2014,7 +2054,10 @@ def collect_dependencies(
 
         # A precommit fix nobody wrote down, in either direction. Only for a
         # -1 still red in the latest run: an old flake proposes no new link.
-        for peer in peers:
+        # Only the author's PRs: somebody else's PR is held to the stricter
+        # matching of existing_fixes below (it has to name the spotbugs class,
+        # and its Yetus reports must not refute it).
+        for peer in own_peers:
             reference = f"#{peer['number']}"
             peer_paths = [f["path"] for f in ((peer.get("files") or {}).get("nodes") or [])]
             if reference not in depends and own_ci:
@@ -2046,7 +2089,7 @@ def collect_dependencies(
                       for e in depends.values() if e.get("number")]
             fixers += [([f["path"] for f in ((p.get("files") or {}).get("nodes") or [])],
                         p.get("title") or "", p.get("body") or "",
-                        lambda n=p["number"]: pr_diff(repo, n, token)) for p in peers]
+                        lambda n=p["number"]: pr_diff(repo, n, token)) for p in own_peers]
             fixers.append((own_files, own_title, own_body, lambda: self_diff))  # a PR that clears its own -1
             skip_numbers = {self_number} | {e["number"] for e in depends.values() if e.get("number")}
             skip_keys = {k for k in [self_key] + [e.get("jira") for e in depends.values()] if k}
@@ -2133,6 +2176,12 @@ def collect_dependencies(
 
     for entry in list(depends.values()) + list(blocks.values()):
         entry["open"] = entry["state"] not in ("MERGED", "CLOSED")
+        # Gone, not stale: whatever the evidence was, there is nothing left to wait for.
+        if entry["state"] == "MERGED":
+            entry["verdict"] = "MERGED"
+            entry["verdict_reason"] = f"merged into {BASE} on {entry.get('merged_at') or '?'}"
+        elif entry["state"] == "CLOSED":
+            entry["verdict"], entry["verdict_reason"] = "CLOSED", "closed without being merged"
         entry.setdefault("verdict", "UNVERIFIED")
         entry.setdefault("verdict_reason", "the diffs were not compared")
     return {
@@ -2689,6 +2738,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--no-deps", action="store_true", help="skip the search for dependencies on other pull requests")
     parser.add_argument("--no-ci-search", action="store_true", help="do not look for PRs of others or JIRA issues that fix the failures none of your PRs clears")
     parser.add_argument("--no-diffs", action="store_true", help="do not download the diffs; dependencies are then reported as declared, without a verdict")
+    parser.add_argument("--peers", choices=("author", "all"), default="author", help="compare with the author's open PRs (default) or with every open PR of the repository")
     parser.add_argument("--format", choices=("report", "markdown", "json"), default="report")
     parser.add_argument("--width", type=int, default=None, help="report width (default: terminal width)")
     parser.add_argument("--token", default=None, help="GitHub token (else $GITHUB_TOKEN or gh)")
@@ -2749,6 +2799,7 @@ def main(argv: list[str] | None = None) -> int:
             deps = collect_dependencies(
                 pr, jira, args.repo, token, repo_path, use_diffs=not args.no_diffs,
                 jira_base=args.jira_base, search_external=not args.no_ci_search,
+                all_peers=args.peers == "all",
             )
         report = analyse(
             jira, pr, args.repo, args.jira_base, repo_path, args.stale_days,

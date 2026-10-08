@@ -54,4 +54,10 @@ E = fd.Target(pr(5), J("HADOOP-5", links),
 (_, changes, _), = fd.plan_all([E], "o/r", "https://j", None, True, False, "me")
 print("removes:", [c.key for c in changes])
 assert [c.key for c in changes] == ["unlink:6"]
+
+# --peers all pages through every open PR.
+pages = iter([{"pageInfo": {"hasNextPage": True, "endCursor": "c1"}, "nodes": [{"number": 1}, None]},
+              {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": [{"number": 2}]}])
+core.graphql = lambda q, v, t: {"repository": {"pullRequests": next(pages)}}
+assert [p["number"] for p in core.fetch_open_prs("o/r", None)] == [1, 2]
 print("plan_smoke: OK")

@@ -1,0 +1,66 @@
+name: PR dependencies
+
+# Keeps the 'Depends on' / 'Required by' block of your open PRs in sync with
+# every open PR of the project, using hadoop-prtracker's fix_dependencies.py.
+# Copy it to .github/workflows/ of your fork's default branch. Only PRs opened
+# by the owner of the PRTRACKER_TOKEN secret are edited (a classic PAT with the
+# public_repo scope).
+on:
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+    inputs:
+      prs:
+        description: PR numbers or JIRA ids, space-separated (empty = all your open PRs)
+        required: false
+      apply:
+        description: Edit the descriptions (unchecked = dry run)
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-dependencies
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          repository: ${{ vars.PRTRACKER_REPO || format('{0}/hadoop-prtracker', github.repository_owner) }}
+      # The project's default branch, so symbols already there are not taken
+      # for ones another PR introduces.
+      - uses: actions/checkout@v7
+        with:
+          repository: apache/${{ vars.PRTRACKER_PROFILE || 'hadoop' }}
+          path: project
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Update the dependency blocks
+        env:
+          GITHUB_TOKEN: ${{ secrets.PRTRACKER_TOKEN }}
+          PRTRACKER_PROFILE: ${{ vars.PRTRACKER_PROFILE || 'hadoop' }}
+          HADOOP_REPO_PATH: ${{ github.workspace }}/project
+          HBASE_REPO_PATH: ${{ github.workspace }}/project
+          PRS: ${{ inputs.prs }}
+          APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
+        run: |
+          if [ -z "$GITHUB_TOKEN" ]; then
+            echo "::error::set the PRTRACKER_TOKEN secret (classic PAT, public_repo scope)"
+            exit 1
+          fi
+          set -f  # $PRS is split into words, never globbed
+          args=(${PRS:---all-open} --pr-only --peers all)
+          [ "$APPLY" = true ] && args+=(--apply --force)
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          python fix_dependencies.py "${args[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
