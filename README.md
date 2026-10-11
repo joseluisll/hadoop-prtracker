@@ -240,6 +240,17 @@ trunk looks like one another PR introduces. It needs:
 
 JIRA is not touched.
 
+## qbt report workflow
+
+[qbt-report.yml](.github/workflows/qbt-report.yml) runs `qbt_jira.py --show-discarded` over
+the Hadoop qbt jobs every two days (odd days of the month, 06:23 UTC), and on demand (Actions →
+qbt report → Run workflow, with the number of builds to read). The ranked report is the run's
+summary; the report, the log with the `create_jira.py` commands and each proposed description
+(`--save-dir`) are the `qbt-report` artifact. It runs in this repository: it only reads public
+data, so the workflow's own token does, or the secret `PRTRACKER_TOKEN` when it is set. It
+checks out trunk's file tree (no file contents) to place spotbugs warnings in their module.
+Nothing is filed.
+
 ## Safety model
 
 - **Dry run by default.** Without `--apply` the scripts only print what they would change.
