@@ -224,19 +224,18 @@ type, and its Yetus reports do not refute it).
 
 ## Dependencies workflow
 
-[dependencies-workflow.yml](dependencies-workflow.yml) runs
-`fix_dependencies.py --all-open --peers all --pr-only --apply --force` every day, and on demand
-(Actions → PR dependencies → Run workflow, with PR numbers, and unchecking *apply* for a dry
-run). It rewrites the dependency block of your open PRs; the plan it applied is the run's
-summary. Copy it to `.github/workflows/` on the default branch of your fork of the project
-(scheduled workflows run only from there). It checks out this repository for the scripts and
-the project's base branch (latest commit only) as the clone, without which a symbol already on
-trunk looks like one another PR introduces. It needs:
+[dependencies.yml](.github/workflows/dependencies.yml) runs
+`fix_dependencies.py --all-open --peers all --pr-only --apply --force` every day (05:17 UTC),
+and on demand (Actions → PR dependencies → Run workflow, with PR numbers, and unchecking
+*apply* for a dry run). It rewrites the dependency block of your open PRs; the plan it applied
+is the run's summary. It runs in this repository (scheduled workflows run only from its default
+branch, `main`), and checks out the project's base branch (latest commit only) as the clone,
+without which a symbol already on trunk looks like one another PR introduces. It needs:
 
 - the secret `PRTRACKER_TOKEN`: a classic personal access token with the `public_repo` scope.
-  Only PRs opened by its owner are edited, as with every write of `fix_dependencies.py`.
-- optionally the variables `PRTRACKER_PROFILE` (`hbase`; default `hadoop`) and `PRTRACKER_REPO`
-  (default `<fork owner>/hadoop-prtracker`).
+  Only PRs opened by its owner are edited, as with every write of `fix_dependencies.py`. Without
+  it the run fails, and nothing is edited.
+- optionally the variable `PRTRACKER_PROFILE` (`hbase`; default `hadoop`).
 
 JIRA is not touched.
 
