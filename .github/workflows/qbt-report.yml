@@ -1,0 +1,88 @@
+name: qbt report
+
+# Runs qbt_jira.py every two days, once per profile: the nightly
+# hadoop-qbt-trunk-javaNN jobs (hadoop) and the HBase Nightly build of master
+# (hbase). Each run's summary is its ranked report, and each proposed JIRA
+# description (with the create_jira.py command that would file it) is in its
+# artifact. A dry run, always: nothing is written to JIRA or GitHub. It only
+# reads public data, so the workflow's own token is enough; the
+# PRTRACKER_TOKEN secret is used instead when it is set.
+on:
+  schedule:
+    # Every odd day of the month (the 31st and the 1st both run).
+    - cron: "23 6 */2 * *"
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Project to report on
+        type: choice
+        options: [all, hadoop, hbase]
+        default: all
+      history:
+        description: Builds per qbt job to read, the latest included
+        required: false
+        default: "7"
+      show_discarded:
+        description: Also list the candidates already tracked, and by what
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qbt-report
+  cancel-in-progress: false
+
+jobs:
+  report:
+    name: report (${{ matrix.profile }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: ${{ fromJSON(inputs.profile == 'hadoop' && '["hadoop"]' || inputs.profile == 'hbase' && '["hbase"]' || '["hadoop","hbase"]') }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      # The base branch's file list, so spotbugs warnings are placed in the
+      # module whose source has them. Only the trees are needed, not the files.
+      - uses: actions/checkout@v7
+        with:
+          repository: apache/${{ matrix.profile }}
+          ref: ${{ matrix.profile == 'hbase' && 'master' || 'trunk' }}
+          path: project
+          filter: blob:none
+          sparse-checkout: dev-support
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Read the qbt reports
+        env:
+          GITHUB_TOKEN: ${{ secrets.PRTRACKER_TOKEN || github.token }}
+          PRTRACKER_PROFILE: ${{ matrix.profile }}
+          HISTORY: ${{ inputs.history || '7' }}
+          SHOW_DISCARDED: ${{ github.event_name == 'schedule' || inputs.show_discarded }}
+        run: |
+          args=(--format markdown --history "$HISTORY" --save-dir proposals
+                --repo-path "$GITHUB_WORKSPACE/project")
+          [ "$SHOW_DISCARDED" = true ] && args+=(--show-discarded)
+          # The progress and the create_jira.py commands go to stderr.
+          status=0
+          python qbt_jira.py "${args[@]}" > qbt-report.md 2> qbt-log.txt || status=$?
+          cat qbt-log.txt >&2
+          cat qbt-report.md >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: qbt-report-${{ matrix.profile }}
+          path: |
+            qbt-report.md
+            qbt-log.txt
+            proposals/
+          if-no-files-found: ignore
+          retention-days: 30

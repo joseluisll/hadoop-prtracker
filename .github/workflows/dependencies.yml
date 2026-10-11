@@ -1,9 +1,8 @@
 name: PR dependencies
 
 # Keeps the 'Depends on' / 'Required by' block of your open PRs in sync with
-# every open PR of the project, using hadoop-prtracker's fix_dependencies.py.
-# Copy it to .github/workflows/ of your fork's default branch. Only PRs opened
-# by the owner of the PRTRACKER_TOKEN secret are edited (a classic PAT with the
+# every open PR of the project, using fix_dependencies.py. Only PRs opened by
+# the owner of the PRTRACKER_TOKEN secret are edited (a classic PAT with the
 # public_repo scope).
 on:
   schedule:
@@ -34,8 +33,6 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v7
-        with:
-          repository: ${{ vars.PRTRACKER_REPO || format('{0}/hadoop-prtracker', github.repository_owner) }}
       # The project's default branch, so symbols already there are not taken
       # for ones another PR introduces.
       - uses: actions/checkout@v7

@@ -224,21 +224,49 @@ type, and its Yetus reports do not refute it).
 
 ## Dependencies workflow
 
-[dependencies-workflow.yml](dependencies-workflow.yml) runs
-`fix_dependencies.py --all-open --peers all --pr-only --apply --force` every day, and on demand
-(Actions → PR dependencies → Run workflow, with PR numbers, and unchecking *apply* for a dry
-run). It rewrites the dependency block of your open PRs; the plan it applied is the run's
-summary. Copy it to `.github/workflows/` on the default branch of your fork of the project
-(scheduled workflows run only from there). It checks out this repository for the scripts and
-the project's base branch (latest commit only) as the clone, without which a symbol already on
-trunk looks like one another PR introduces. It needs:
+[dependencies.yml](.github/workflows/dependencies.yml) runs
+`fix_dependencies.py --all-open --peers all --pr-only --apply --force` every day (05:17 UTC),
+and on demand (Actions → PR dependencies → Run workflow, with PR numbers, and unchecking
+*apply* for a dry run). It rewrites the dependency block of your open PRs; the plan it applied
+is the run's summary. It runs in this repository (scheduled workflows run only from its default
+branch, `main`), and checks out the project's base branch (latest commit only) as the clone,
+without which a symbol already on trunk looks like one another PR introduces. It needs:
 
 - the secret `PRTRACKER_TOKEN`: a classic personal access token with the `public_repo` scope.
-  Only PRs opened by its owner are edited, as with every write of `fix_dependencies.py`.
-- optionally the variables `PRTRACKER_PROFILE` (`hbase`; default `hadoop`) and `PRTRACKER_REPO`
-  (default `<fork owner>/hadoop-prtracker`).
+  Only PRs opened by its owner are edited, as with every write of `fix_dependencies.py`. Without
+  it the run fails, and nothing is edited.
+- optionally the variable `PRTRACKER_PROFILE` (`hbase`; default `hadoop`).
 
 JIRA is not touched.
+
+## qbt report workflow
+
+[qbt-report.yml](.github/workflows/qbt-report.yml) runs `qbt_jira.py --show-discarded` every
+two days (odd days of the month, 06:23 UTC) for both profiles, one job each: the Hadoop qbt jobs
+and the HBase Nightly build of master. It also runs on demand (Actions → qbt report → Run
+workflow, with the profile and the number of builds to read). Each job's ranked report is its
+summary; the report, the log with the `create_jira.py` commands and each proposed description
+(`--save-dir`) are its `qbt-report-<profile>` artifact. It runs in this repository: it only reads
+public data, so the workflow's own token does, or the secret `PRTRACKER_TOKEN` when it is set.
+It checks out the base branch's file tree (no file contents) to place spotbugs warnings in their
+module. Nothing is filed.
+
+## Review queue workflow
+
+[review-queue.yml](.github/workflows/review-queue.yml) runs `review_queue.py --explain` every
+two days (odd days of the month, 06:41 UTC) for both profiles, one job each, and on demand
+(Actions → Review queue → Run workflow, with the profile, how many PRs to recommend and the
+components to focus on). Each job's summary is its report: the top PRs to review with the points
+behind each, then every open PR per component; it is also its `review-queue-<profile>`
+artifact. It reads only public data, with the workflow's own token or the secret
+`PRTRACKER_TOKEN` when it is set, and checks out the base branch's file tree for the modules.
+Optional repository variables:
+
+- `PRTRACKER_USER`: your GitHub login (default: the owner of this repository). Your PRs are
+  never recommended.
+- `PRTRACKER_EMAIL`: the email of your commits in the project. When set, a year of the base
+  branch's history (trees only) is fetched, so your commits make up your area as on your clone;
+  without it, your area comes from your open PRs only.
 
 ## Safety model
 

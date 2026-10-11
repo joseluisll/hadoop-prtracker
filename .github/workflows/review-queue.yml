@@ -1,0 +1,100 @@
+name: Review queue
+
+# Runs review_queue.py every two days, once per profile (hadoop, hbase): the
+# PRs where a review helps most, with the points behind each, then every open
+# PR per component. Each run's summary is its report, also kept as an
+# artifact. Read-only: it never writes to GitHub or JIRA. It only reads public
+# data, so the workflow's own token is enough; the PRTRACKER_TOKEN secret is
+# used instead when it is set.
+#
+# Optional repository variables:
+#   PRTRACKER_USER   your GitHub login (default: the owner of this repository);
+#                    your own PRs are never recommended
+#   PRTRACKER_EMAIL  the email of your commits in the project; when set, a year
+#                    of the base branch's history is fetched so your commits
+#                    make up your area, as they do on your clone
+on:
+  schedule:
+    # Every odd day of the month (the 31st and the 1st both run).
+    - cron: "41 6 */2 * *"
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Project to report on
+        type: choice
+        options: [all, hadoop, hbase]
+        default: all
+      top:
+        description: PRs to recommend
+        required: false
+        default: "10"
+      focus:
+        description: Components or JIRA projects you want to review, space-separated (replaces your area)
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: review-queue
+  cancel-in-progress: false
+
+jobs:
+  report:
+    name: review queue (${{ matrix.profile }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: ${{ fromJSON(inputs.profile == 'hadoop' && '["hadoop"]' || inputs.profile == 'hbase' && '["hbase"]' || '["hadoop","hbase"]') }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      BASE: ${{ matrix.profile == 'hbase' && 'master' || 'trunk' }}
+    steps:
+      - uses: actions/checkout@v7
+      # The base branch's file list gives each changed file its Maven module.
+      # Only the trees are needed, not the files.
+      - uses: actions/checkout@v7
+        with:
+          repository: apache/${{ matrix.profile }}
+          ref: ${{ env.BASE }}
+          path: project
+          filter: blob:none
+          sparse-checkout: dev-support
+      - name: Fetch a year of your history
+        if: vars.PRTRACKER_EMAIL != ''
+        env:
+          EMAIL: ${{ vars.PRTRACKER_EMAIL }}
+        run: |
+          git -C project fetch --quiet --filter=blob:none --shallow-since="13 months ago" origin "$BASE"
+          git -C project config user.email "$EMAIL"
+          # Changed file names come from the trees; rename detection would
+          # fetch the blobs one by one.
+          git -C project config diff.renames false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Rank the open PRs
+        env:
+          GITHUB_TOKEN: ${{ secrets.PRTRACKER_TOKEN || github.token }}
+          PRTRACKER_PROFILE: ${{ matrix.profile }}
+          REVIEWER: ${{ vars.PRTRACKER_USER || github.repository_owner }}
+          TOP: ${{ inputs.top || '10' }}
+          FOCUS: ${{ inputs.focus }}
+        run: |
+          set -f  # $FOCUS is split into words, never globbed
+          args=(--format markdown --explain --top "$TOP" --user "$REVIEWER"
+                --repo-path "$GITHUB_WORKSPACE/project")
+          for name in $FOCUS; do args+=(--focus "$name"); done
+          python review_queue.py "${args[@]}" > review-queue.md
+          cat review-queue.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: review-queue-${{ matrix.profile }}
+          path: review-queue.md
+          if-no-files-found: ignore
+          retention-days: 30
