@@ -251,6 +251,23 @@ public data, so the workflow's own token does, or the secret `PRTRACKER_TOKEN` w
 It checks out the base branch's file tree (no file contents) to place spotbugs warnings in their
 module. Nothing is filed.
 
+## Review queue workflow
+
+[review-queue.yml](.github/workflows/review-queue.yml) runs `review_queue.py --explain` every
+two days (odd days of the month, 06:41 UTC) for both profiles, one job each, and on demand
+(Actions → Review queue → Run workflow, with the profile, how many PRs to recommend and the
+components to focus on). Each job's summary is its report: the top PRs to review with the points
+behind each, then every open PR per component; it is also its `review-queue-<profile>`
+artifact. It reads only public data, with the workflow's own token or the secret
+`PRTRACKER_TOKEN` when it is set, and checks out the base branch's file tree for the modules.
+Optional repository variables:
+
+- `PRTRACKER_USER`: your GitHub login (default: the owner of this repository). Your PRs are
+  never recommended.
+- `PRTRACKER_EMAIL`: the email of your commits in the project. When set, a year of the base
+  branch's history (trees only) is fetched, so your commits make up your area as on your clone;
+  without it, your area comes from your open PRs only.
+
 ## Safety model
 
 - **Dry run by default.** Without `--apply` the scripts only print what they would change.
