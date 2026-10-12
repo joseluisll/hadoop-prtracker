@@ -81,7 +81,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 import analyze_pr as core
-from list_upstream_prs import (days_since, graphql, parse_yetus_comment,
+from list_upstream_prs import (GitHubAPIError, days_since, graphql, parse_yetus_comment,
                                resolve_token, summarise_reviews)
 
 ROOT = "(root)"
@@ -114,8 +114,8 @@ POINTS = {
 }
 
 QUERY = """
-query($q: String!, $after: String) {
-  search(query: $q, type: ISSUE, first: 25, after: $after) {
+query($q: String!, $after: String, $first: Int!) {
+  search(query: $q, type: ISSUE, first: $first, after: $after) {
     pageInfo { hasNextPage endCursor }
     nodes {
       ... on PullRequest {
@@ -156,9 +156,19 @@ def fetch_open_prs(repo: str, base: str, token: str | None) -> list[dict[str, An
     query = f"repo:{repo} is:pr is:open"
     if base != "*":
         query += f" base:{base}"
-    prs, after = [], None
+    prs, after, first = [], None, 25
     while True:
-        data = graphql(QUERY, {"q": query, "after": after}, token)["search"]
+        try:
+            data = graphql(QUERY, {"q": query, "after": after, "first": first}, token)["search"]
+        except GitHubAPIError as exc:
+            # A 502 or 504 is a page GitHub could not build in time (each PR
+            # brings its files and comments): ask for smaller ones.
+            if exc.status not in (502, 504) or first <= 5:
+                raise
+            first = max(5, first // 2)
+            print(f"\nGitHub timed out on a page of PRs; {first} per page from now on",
+                  file=sys.stderr, flush=True)
+            continue
         prs += [core.add_actions_yetus(n, repo, token) for n in data["nodes"] or [] if n]
         print(f"\rfetched {len(prs)} open PRs", end="", file=sys.stderr, flush=True)
         if not data["pageInfo"]["hasNextPage"]:
