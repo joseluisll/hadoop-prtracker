@@ -173,6 +173,15 @@ def fetch(request: urllib.request.Request, timeout: float = 60,
         time.sleep(RETRY_WAIT * (attempt + 1))
 
 
+class GitHubAPIError(SystemExit):
+    """An HTTP error of the GitHub API: ends the script, unless a caller that
+    can do something about its status catches it."""
+
+    def __init__(self, status: int, message: str) -> None:
+        super().__init__(message)
+        self.status = status
+
+
 def graphql(query: str, variables: dict[str, Any], token: str | None) -> dict[str, Any]:
     payload = json.dumps({"query": query, "variables": variables}).encode()
     headers = {
@@ -186,7 +195,7 @@ def graphql(query: str, variables: dict[str, Any], token: str | None) -> dict[st
     if status == 0:
         raise SystemExit(f"Cannot reach the GitHub API: {data.decode(errors='replace')}")
     if status != 200:
-        raise SystemExit(f"GitHub API error {status}: {data.decode(errors='replace')[:500]}")
+        raise GitHubAPIError(status, f"GitHub API error {status}: {data.decode(errors='replace')[:500]}")
     body = json.loads(data.decode())
     if body.get("errors"):
         messages = "; ".join(e.get("message", str(e)) for e in body["errors"])
