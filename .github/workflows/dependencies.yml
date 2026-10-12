@@ -2,8 +2,8 @@ name: PR dependencies
 
 # Keeps the 'Depends on' / 'Required by' block of your open PRs in sync with
 # every open PR of the project, using fix_dependencies.py. Only PRs opened by
-# the owner of the PRTRACKER_TOKEN secret are edited (a classic PAT with the
-# public_repo scope).
+# the owner of the PREPARATION_PUSH_TOKEN secret are edited (a classic PAT
+# with the public_repo scope).
 on:
   schedule:
     - cron: "17 5 * * *"
@@ -44,7 +44,7 @@ jobs:
           python-version: "3.12"
       - name: Update the dependency blocks
         env:
-          GITHUB_TOKEN: ${{ secrets.PRTRACKER_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.PREPARATION_PUSH_TOKEN }}
           PRTRACKER_PROFILE: ${{ vars.PRTRACKER_PROFILE || 'hadoop' }}
           HADOOP_REPO_PATH: ${{ github.workspace }}/project
           HBASE_REPO_PATH: ${{ github.workspace }}/project
@@ -52,7 +52,7 @@ jobs:
           APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
         run: |
           if [ -z "$GITHUB_TOKEN" ]; then
-            echo "::error::set the PRTRACKER_TOKEN secret (classic PAT, public_repo scope)"
+            echo "::error::set the PREPARATION_PUSH_TOKEN secret (classic PAT, public_repo scope)"
             exit 1
           fi
           set -f  # $PRS is split into words, never globbed

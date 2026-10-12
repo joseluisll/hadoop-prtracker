@@ -6,7 +6,7 @@ name: qbt report
 # description (with the create_jira.py command that would file it) is in its
 # artifact. A dry run, always: nothing is written to JIRA or GitHub. It only
 # reads public data, so the workflow's own token is enough; the
-# PRTRACKER_TOKEN secret is used instead when it is set.
+# PREPARATION_PUSH_TOKEN secret is used instead when it is set.
 on:
   schedule:
     # Every odd day of the month (the 31st and the 1st both run).
@@ -62,7 +62,7 @@ jobs:
           python-version: "3.12"
       - name: Read the qbt reports
         env:
-          GITHUB_TOKEN: ${{ secrets.PRTRACKER_TOKEN || github.token }}
+          GITHUB_TOKEN: ${{ secrets.PREPARATION_PUSH_TOKEN || github.token }}
           PRTRACKER_PROFILE: ${{ matrix.profile }}
           HISTORY: ${{ inputs.history || '7' }}
           SHOW_DISCARDED: ${{ github.event_name == 'schedule' || inputs.show_discarded }}
