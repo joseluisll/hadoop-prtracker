@@ -268,6 +268,12 @@ Optional repository variables:
   branch's history (trees only) is fetched, so your commits make up your area as on your clone;
   without it, your area comes from your open PRs only.
 
+The three workflows share one concurrency group (`prtracker`), and the qbt report and review
+queue run their profiles one after the other, so only one job sends requests with the token at a
+time: GitHub's secondary rate limit stops a burst of them. A run started while another is going
+waits for it; GitHub keeps only one waiting run per group, so a third one started meanwhile
+cancels the waiting one.
+
 ## Safety model
 
 - **Dry run by default.** Without `--apply` the scripts only print what they would change.

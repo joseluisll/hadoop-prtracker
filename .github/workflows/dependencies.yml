@@ -21,7 +21,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: pr-dependencies
+  # Shared by the dependencies, qbt report and review queue workflows: one
+  # run at a time, so they never send the same token's requests in parallel.
+  group: prtracker
   cancel-in-progress: false
 
 jobs:

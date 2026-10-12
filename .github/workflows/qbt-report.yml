@@ -31,7 +31,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: qbt-report
+  # Shared by the dependencies, qbt report and review queue workflows: one
+  # run at a time, so they never send the same token's requests in parallel.
+  group: prtracker
   cancel-in-progress: false
 
 jobs:
@@ -41,6 +43,7 @@ jobs:
     timeout-minutes: 60
     strategy:
       fail-fast: false
+      max-parallel: 1  # hadoop, then hbase
       matrix:
         profile: ${{ fromJSON(inputs.profile == 'hadoop' && '["hadoop"]' || inputs.profile == 'hbase' && '["hbase"]' || '["hadoop","hbase"]') }}
     defaults:
