@@ -4,8 +4,8 @@ name: Review queue
 # PRs where a review helps most, with the points behind each, then every open
 # PR per component. Each run's summary is its report, also kept as an
 # artifact. Read-only: it never writes to GitHub or JIRA. It only reads public
-# data, so the workflow's own token is enough; the PRTRACKER_TOKEN secret is
-# used instead when it is set.
+# data, so the workflow's own token is enough; the PREPARATION_PUSH_TOKEN
+# secret is used instead when it is set.
 #
 # Optional repository variables:
 #   PRTRACKER_USER   your GitHub login (default: the owner of this repository);
@@ -79,7 +79,7 @@ jobs:
           python-version: "3.12"
       - name: Rank the open PRs
         env:
-          GITHUB_TOKEN: ${{ secrets.PRTRACKER_TOKEN || github.token }}
+          GITHUB_TOKEN: ${{ secrets.PREPARATION_PUSH_TOKEN || github.token }}
           PRTRACKER_PROFILE: ${{ matrix.profile }}
           REVIEWER: ${{ vars.PRTRACKER_USER || github.repository_owner }}
           TOP: ${{ inputs.top || '10' }}

@@ -232,7 +232,7 @@ is the run's summary. It runs in this repository (scheduled workflows run only f
 branch, `main`), and checks out the project's base branch (latest commit only) as the clone,
 without which a symbol already on trunk looks like one another PR introduces. It needs:
 
-- the secret `PRTRACKER_TOKEN`: a classic personal access token with the `public_repo` scope.
+- the secret `PREPARATION_PUSH_TOKEN`: a classic personal access token with the `public_repo` scope.
   Only PRs opened by its owner are edited, as with every write of `fix_dependencies.py`. Without
   it the run fails, and nothing is edited.
 - optionally the variable `PRTRACKER_PROFILE` (`hbase`; default `hadoop`).
@@ -247,7 +247,7 @@ and the HBase Nightly build of master. It also runs on demand (Actions → qbt r
 workflow, with the profile and the number of builds to read). Each job's ranked report is its
 summary; the report, the log with the `create_jira.py` commands and each proposed description
 (`--save-dir`) are its `qbt-report-<profile>` artifact. It runs in this repository: it only reads
-public data, so the workflow's own token does, or the secret `PRTRACKER_TOKEN` when it is set.
+public data, so the workflow's own token does, or the secret `PREPARATION_PUSH_TOKEN` when it is set.
 It checks out the base branch's file tree (no file contents) to place spotbugs warnings in their
 module. Nothing is filed.
 
@@ -259,7 +259,7 @@ two days (odd days of the month, 06:41 UTC) for both profiles, one job each, and
 components to focus on). Each job's summary is its report: the top PRs to review with the points
 behind each, then every open PR per component; it is also its `review-queue-<profile>`
 artifact. It reads only public data, with the workflow's own token or the secret
-`PRTRACKER_TOKEN` when it is set, and checks out the base branch's file tree for the modules.
+`PREPARATION_PUSH_TOKEN` when it is set, and checks out the base branch's file tree for the modules.
 Optional repository variables:
 
 - `PRTRACKER_USER`: your GitHub login (default: the owner of this repository). Your PRs are
