@@ -16,13 +16,15 @@ token (default login `joseluisll`).
   *Source:* README.md.
 - **R2** Every tool shall be a standalone Python 3.12+ command-line script at the
   repository root, using only the standard library, except `pr_manager.py`, which
-  also needs `textual` (the only entry of `requirements.txt`).
-  *Source:* requirements.txt, pr_manager.py imports.
+  also needs `textual` (the only entry of `requirements.txt`), and `pr_graph.py`,
+  which is a library module without a command line.
+  *Source:* requirements.txt, pr_manager.py imports, pr_graph.py.
 - **R3** `analyze_pr.py` shall be the shared core that the other scripts import;
   `list_upstream_prs.py` shall sit next to it (its check, Yetus and review analysis
   is reused). *Source:* analyze_pr.py docstring, imports of every script.
 - **R4** Every script shall print usage with `--help` and run its work only from
-  `main()` under `if __name__ == "__main__"`. *Source:* every script, ci.yml.
+  `main()` under `if __name__ == "__main__"`; `pr_graph.py` has no command line.
+  *Source:* every script, ci.yml.
 
 ## 2. Profiles and configuration
 
@@ -59,7 +61,7 @@ token (default login `joseluisll`).
 
 - **R13** Every HTTP request shall be retried up to 3 times on 429, 502, 503, 504, a
   dropped connection, a TLS error or a timeout, waiting 2 s × attempt between tries.
-  *Source:* `list_upstream_prs.fetch`.
+  *Source:* `list_upstream_prs.fetch`, `analyze_pr.http_get`.
 - **R14** An unreachable GitHub API or a GraphQL error shall end the script with a
   clear message; an HTTP error shall carry its status (`GitHubAPIError`) so a caller
   can react to it. *Source:* `list_upstream_prs.graphql`.
@@ -86,8 +88,9 @@ token (default login `joseluisll`).
   prints every change before writing it. *Source:* `parse_args` of fix_dependencies.py
   and create_jira.py.
 - **R21** `create_jira.py --force` shall never create an issue that may already be
-  filed: such a proposal is skipped; without `--force` the user is asked.
-  *Source:* `create_jira.main`.
+  filed: such a proposal is skipped; without `--force` the user is asked. A duplicate
+  search that failed counts as "may be filed". *Source:* `create_jira.already_filed`,
+  `create_jira.main`.
 - **R22** `list_upstream_prs.py`, `analyze_pr.py`, `review_queue.py`, `qbt_jira.py`,
   `list_stale_branches.py`, `list_my_jiras.py` and `list_feat_branches.py` shall not
   write to GitHub or JIRA (the branch scripts may `git fetch`). *Source:* README,
@@ -95,8 +98,9 @@ token (default login `joseluisll`).
 - **R23** The dependency tools shall never create a JIRA issue; a missing one is
   reported with a suggested summary. *Source:* README "Safety model", `fix_dependencies`.
 - **R24** A PR description shall be edited only when the PR was opened by the owner of
-  the GitHub token, checked when planning and again right before the write.
-  *Source:* `fix_dependencies.plan_for`, `update_pr_body`.
+  the GitHub token, checked when planning and again right before the write; when the
+  login is unknown, the write is refused. *Source:* `fix_dependencies.plan_for`,
+  `update_pr_body`.
 - **R25** Right before each write the current state shall be read again: the JIRA
   links before a link is made (no duplicate, no cycle closed), the PR description
   before it is replaced (no concurrent edit lost), possible duplicates before an
@@ -124,9 +128,9 @@ token (default login `joseluisll`).
 - **R32** The head commit's checks shall be split into GitHub Actions and Yetus/Jenkins
   (name matching `yetus|jenkins`), counting `X` and `X(jenkins)` once.
   *Source:* `classify_contexts`.
-- **R33** The newest comment by a precommit bot that contains "overall" shall be read
-  for the overall vote, the -1 subsystems and whether a rebase is required.
-  *Source:* `parse_yetus_comment`.
+- **R33** The comment by a precommit bot that contains "overall" and has the newest
+  `createdAt` shall be read for the overall vote, the -1 subsystems and whether a rebase
+  is required. *Source:* `parse_yetus_comment`.
 - **R34** The comments shall give the evidence: CI, Yetus, conflicts, review situation
   (changes requested, approved, pending reviewers, comments only, no reviewer) and
   inactivity of `--stale-days` (default 14) or more. *Source:* `evaluate`.
@@ -146,8 +150,9 @@ token (default login `joseluisll`).
 - **R38** CI failures shall come from the Yetus comments, the Jenkins unit logs, the
   latest failed GitHub Actions runs of the branch (at most 6) and spotbugs reports;
   under the `hbase` profile, from the Yetus artifacts of the Actions runs of the last
-  3 head commits, treated as one Yetus comment per commit. *Source:*
-  `parse_ci_failures`, `actions_failures`, `actions_yetus_comments`, README "Profiles".
+  3 head commits, treated as one Yetus comment per commit; without a GitHub token, a
+  warning is printed and no Yetus result is read. *Source:* `parse_ci_failures`,
+  `actions_failures`, `actions_yetus_comments`, README "Profiles".
 - **R39** Under `hbase`, an artifact of a passing job larger than 5 MB shall not be
   downloaded and shall count as a passing unit row. *Source:* `YETUS_ZIP_PASSED_MAX`.
 - **R40** Each Yetus -1 shall come with practical advice for its subsystem.
@@ -299,12 +304,13 @@ token (default login `joseluisll`).
   reports as verified, partial, refuted or not verified, and a refuted one does not
   count. *Source:* `tracking`, `existing_fixes`, `yetus_verdict`.
 - **R80** The output shall start with every candidate ranked by the open PRs it helps,
-  then score, saying who works on it; `--show-discarded` adds the tracked ones.
-  *Source:* `rank_key`, `render_text`, `render_markdown`.
+  then score, saying who works on it, whatever its score; `--show-discarded` adds the
+  tracked ones. *Source:* `rank_key`, `render_text`, `render_markdown`, `main`.
 - **R81** It shall never write: `--save-dir` writes each description to a file and
   prints the `create_jira.py` command that would file it. *Source:* `save`, `main`.
-- **R82** `--min-score` and `--limit` shall hide low proposals and cap their number;
-  formats text, markdown and JSON, with progress on stderr outside text.
+- **R82** Without `--min-score` every untracked candidate shall be a proposal, whatever
+  its score; `--min-score N` shall hide proposals scoring below N, and `--limit` cap their
+  number. Formats text, markdown and JSON, with progress on stderr outside text.
   *Source:* `main`.
 - **R83** Under `hbase`, a failed goal shall be put on the project its unit log names,
   and tests that failed before a rerun passed them shall be listed.
@@ -331,11 +337,13 @@ token (default login `joseluisll`).
   commits (by the clone's `user.email`) in the last `--area-days` plus your open PRs;
   `--focus` replaces it. *Source:* `your_history`, `your_area`, `score`.
 - **R90** The top `--top` (10) shall hold at most `--max-per-component` (3) PRs of one
-  component. *Source:* `recommend`.
+  component; `--top` must be at least 1. *Source:* `parse_args`, `recommend`.
 - **R91** `--view`, `--mine`/`--others` (exclusive), `--component`, `--format`
   (table, markdown, JSON) and `--from-json` (offline input) shall shape the output.
   *Source:* `parse_args`, `main`.
-- **R92** It shall only run GraphQL queries and git read commands. *Source:* README.
+- **R92** It shall only read: GraphQL queries, git read commands and, under `hbase`,
+  read-only GitHub Actions REST calls for the Yetus artifacts. *Source:* README,
+  `fetch_open_prs`, `analyze_pr.add_actions_yetus`.
 
 ## 14. Fork branches
 
@@ -350,8 +358,9 @@ token (default login `joseluisll`).
   `--max-pr-commits`, 25), a shared JIRA key, or earlier PRs of the same branch.
   *Source:* `compute_relations`, `apply_jira_relations`.
 - **R95** Mirrors of upstream shall be hidden unless `--include-mirrors`, ACTIVE unless
-  `--all`; `--only` filters statuses; `--protect` (default: the base branch) is never
-  stale; a truncated comparison makes a branch CANDIDATE. *Source:* `parse_args`, `classify`.
+  `--all`; `--only` filters statuses; `--protect` (default: the base branch plus `trunk`,
+  `main` and `master`) is never stale; a truncated comparison makes a branch CANDIDATE.
+  *Source:* `parse_args`, `classify`.
 - **R96** `--no-fetch`, `--offline` and `--fetch-upstream-branches` shall control git
   network access; output as table, markdown or JSON; nothing is deleted.
   *Source:* `parse_args`, `main`.
@@ -382,14 +391,22 @@ token (default login `joseluisll`).
 - **R102** It shall list, as a markdown table, the unresolved issues reported by
   `--reporter` in the profile's searched projects (paged by 100), each with status,
   summary and its PR (open, else latest; the first JIRA key of the title decides, any
-  author) with Yetus result and date, Build check and approvals. Read-only.
-  *Source:* `my_issues`, `prs_of`, `row`.
+  author) with Yetus result and date, Build check and approvals; a run still waiting for
+  approval, skipped, neutral or stale is reported as such. Read-only. *Source:*
+  `my_issues`, `prs_of`, `row`, `fork_verdict`.
+- **R111** It shall also show the fork's latest Build run on the generated branch
+  `<KEY>` and latest Yetus run on `yetus/<KEY>`, "older than tip" when the run did not
+  test the branch's current commit (Build: `head_sha` differs from the tip; Yetus: the
+  tip's "Yetus" status does not point at the run), "No branch" when the branch is not on
+  the fork, `--fork` (default `joseluisll/<repo name>`), and the verdict labels of R102.
+  *Source:* `report`, `fork_verdict`, `fork_cell`.
 
 ## 16. Automation (GitHub Actions)
 
 - **R103** CI shall run on pull requests and pushes to `main`, on Ubuntu and Windows
   with Python 3.12: compile every script, run each script's `--help`, and run the
-  offline smoke tests. *Source:* ci.yml.
+  offline smoke tests (`plan`, `graph`, `qbt`, `review`, `branches`, `merge`, `build`,
+  `jiras` and `create`). *Source:* ci.yml.
 - **R104** `dependencies.yml` shall run daily at 05:17 UTC and on demand (PR list,
   apply switch), running `fix_dependencies.py --pr-only --peers all` with
   `--apply --force` when applying, against a checkout of the project's base branch; it
@@ -412,7 +429,7 @@ token (default login `joseluisll`).
 
 - **R109** Offline smoke tests shall cover the dependency plan, the graph, qbt parsing
   and scoring, the review queue, the feat/ branch report, the PREPARATION merge, the
-  build requests and the JIRA list; `tests/tui_smoke.py` drives the UI against live
-  PRs with every write stubbed. *Source:* tests/, README "Tests".
+  build requests, the JIRA list and `create_jira.py`; `tests/tui_smoke.py` drives the UI
+  against live PRs with every write stubbed. *Source:* tests/, README "Tests".
 - **R110** The scripts shall work on Linux and Windows, and print titles the console
   cannot encode without crashing. *Source:* ci.yml matrix, `sys.stdout.reconfigure`.

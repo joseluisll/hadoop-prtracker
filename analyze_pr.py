@@ -861,6 +861,9 @@ def yetus_artifact(artifact: dict[str, Any], token: str | None) -> dict[str, Any
     return disk_cached(f"yetus-artifact-{artifact['id']}", compute)
 
 
+_WARNED_NO_TOKEN = False
+
+
 @functools.lru_cache(None)
 def actions_yetus_comments(repo: str, head_repo: str, branch: str, token: str | None,
                            commits: int = 1) -> tuple[dict[str, Any], ...]:
@@ -868,7 +871,14 @@ def actions_yetus_comments(repo: str, head_repo: str, branch: str, token: str | 
     (HBase: the Yetus General Check, JDK17 Compile and Unit Check workflows),
     one comment per head commit, newest first, in the hadoop-yetus format, so
     whatever reads those comments reads these too."""
-    if not (token and head_repo and branch):
+    global _WARNED_NO_TOKEN
+    if not token:
+        if not _WARNED_NO_TOKEN:
+            print("warning: no GitHub token: the HBase Yetus run artifacts cannot be read",
+                  file=sys.stderr)
+            _WARNED_NO_TOKEN = True
+        return ()
+    if not (head_repo and branch):
         return ()
     listing = rest_json(f"repos/{repo}/actions/runs?event=pull_request&per_page=50&branch="
                         f"{urllib.parse.quote(branch)}", token)
@@ -965,18 +975,16 @@ def actions_failures(head_repo: str, branch: str, token: str | None) -> list[dic
 def spotbugs_report(url: str) -> dict[str, list[str]]:
     """class -> bug types, as named by a Jenkins spotbugs report still kept."""
     classes: dict[str, list[str]] = {}
-    try:
-        request = urllib.request.Request(url, headers={"User-Agent": "analyze-pr"})
-        with urllib.request.urlopen(request, timeout=30) as response:
-            text = response.read(2_000_000).decode("utf-8", "replace")
-        flat = " ".join(html_lib.unescape(re.sub(r"<[^>]+>", " ", text)).split())
-        # Each warning reads 'Bug type X (click for details) In class Y ...'.
-        for kind, cls in re.findall(r"Bug type ([A-Z0-9_]+).{0,80}?In class ([\w.$]+)", flat):
-            types = classes.setdefault(cls, [])
-            if kind not in types:
-                types.append(kind)
-    except (urllib.error.URLError, ssl.SSLError, ConnectionError, TimeoutError, ValueError):
-        pass  # Jenkins only keeps the last builds; the module still tells a lot
+    text = http_get(url, limit=2_000_000)
+    if text is None:
+        return classes  # Jenkins only keeps the last builds; the module still tells a lot
+    text = text.decode("utf-8", "replace")
+    flat = " ".join(html_lib.unescape(re.sub(r"<[^>]+>", " ", text)).split())
+    # Each warning reads 'Bug type X (click for details) In class Y ...'.
+    for kind, cls in re.findall(r"Bug type ([A-Z0-9_]+).{0,80}?In class ([\w.$]+)", flat):
+        types = classes.setdefault(cls, [])
+        if kind not in types:
+            types.append(kind)
     return classes
 
 

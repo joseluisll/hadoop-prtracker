@@ -53,3 +53,4 @@ jobs:
           python tests/merge_smoke.py
           python tests/build_smoke.py
           python tests/jiras_smoke.py
+          python tests/create_smoke.py

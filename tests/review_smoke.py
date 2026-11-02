@@ -196,4 +196,11 @@ with tempfile.TemporaryDirectory() as tmp:
         rq.main(base + ["--view", "components", "--mine", "--format", "json"])
     assert [e["number"] for v in json.loads(out.getvalue())["components"].values() for e in v] == [2]
 
+# --top 0 is rejected by argparse.
+try:
+    rq.parse_args(["--top", "0"])
+    raise AssertionError("--top 0 should have failed")
+except SystemExit:
+    pass
+
 print("review_smoke: OK")

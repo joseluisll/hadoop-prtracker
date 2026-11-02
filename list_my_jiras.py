@@ -6,7 +6,9 @@ approval state of its PR. A PR belongs to the issue whose key comes first in
 its title, whoever wrote it. The open PR is shown, else the latest one, so an
 issue left open after its PR merged shows up too. The Fork build and Fork Yetus
 columns come from the fork's own GitHub Actions runs on branch <KEY>; "older
-than tip" means the run did not test the branch's current commit.
+than tip" means the run did not test the branch's current commit. A run waiting
+for approval shows "Awaiting approval to run"; a skipped, neutral or stale one
+says so, and only a failed or timed-out one shows Fail (-1 for Yetus).
 
 Read-only.
 
@@ -100,15 +102,26 @@ def yetus_tested(fork: str, tip: str, run: dict[str, Any], token: str | None) ->
 
 def fork_verdict(run: dict[str, Any], yetus: bool = False) -> str:
     """A run's verdict in the Build or Yetus vocabulary."""
-    if run.get("status") == "queued":
+    status = run.get("status")
+    if status == "queued":
         return "Queued"
-    if run.get("status") != "completed":
+    if status in ("waiting", "pending", "requested", "action_required"):
+        return "Awaiting approval to run"
+    if status != "completed":
         return "Running"
     conclusion = run.get("conclusion")
+    if conclusion == "action_required":
+        return "Awaiting approval to run"
     if conclusion == "success":
         return "+1" if yetus else "Pass"
     if conclusion == "cancelled":
         return "Cancelled"
+    if conclusion == "skipped":
+        return "Skipped"
+    if conclusion == "neutral":
+        return "Neutral"
+    if conclusion == "stale":
+        return "Stale"
     return "-1" if yetus else "Fail"
 
 

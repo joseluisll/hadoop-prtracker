@@ -26,7 +26,9 @@ The output starts with every candidate ranked by the open PRs it would help:
 those whose latest precommit has a -1 that fixing it clears, or is part of.
 A PR that changes a root file (a LICENSE, hadoop-project/pom.xml) gets
 spotbugs run over the whole repo and a -1 for its ~90 old warnings; one of
-those is no help to it, so it does not count.
+those is no help to it, so it does not count. --min-score hides proposals
+below its score; without it every untracked candidate is a proposal, whatever
+its score.
 
 No JIRA is proposed for a candidate somebody already works on: an open pull
 request, or one merged since the failing build, that the same matching as
@@ -85,6 +87,8 @@ import html as html_lib
 import json
 import os
 import re
+import shlex
+import subprocess
 import sys
 import urllib.parse
 import xml.etree.ElementTree as ET
@@ -1112,9 +1116,10 @@ def save(proposals: list[dict[str, Any]], directory: str) -> list[str]:
         with open(path, "w", encoding="utf-8") as handle:
             handle.write(entry["description"] + "\n")
         priority = "Major" if entry["tier"] != "P3" else "Minor"
-        summary = entry["summary"].replace('"', "'")
-        commands.append(f'python create_jira.py --project {entry["project"]} --summary "{summary}" '
-                        f'--description-file "{path}" --priority {priority}')
+        args = ["python", "create_jira.py", "--project", entry["project"],
+                "--summary", entry["summary"], "--description-file", path,
+                "--priority", priority]
+        commands.append(shlex.join(args) if os.name != "nt" else subprocess.list2cmdline(args))
     return commands
 
 
@@ -1138,7 +1143,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="open PRs updated in this many days count (default: %(default)s)")
     parser.add_argument("--include-lint", action="store_true",
                         help="also propose tree-wide -1 votes (xml, pathlen, blanks, ...)")
-    parser.add_argument("--min-score", type=int, default=0, help="hide proposals below it")
+    parser.add_argument("--min-score", type=int, default=None,
+                        help="hide proposals below this score; without it every untracked "
+                             "candidate is a proposal, whatever its score")
     parser.add_argument("--limit", type=int, default=0, help="show at most this many proposals")
     parser.add_argument("--format", choices=("text", "markdown", "json"), default="text")
     parser.add_argument("--show-description", action="store_true",
@@ -1215,7 +1222,7 @@ def main(argv: list[str] | None = None) -> int:
             discarded.append(entry)
             continue
         entry["description"] = describe(entry, runs)
-        if entry["score"] >= args.min_score:
+        if args.min_score is None or entry["score"] >= args.min_score:
             proposals.append(entry)
     proposals.sort(key=rank_key)
     discarded.sort(key=rank_key)

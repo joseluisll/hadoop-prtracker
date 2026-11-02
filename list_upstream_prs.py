@@ -16,7 +16,9 @@ Authentication: the script uses, in order of preference,
   1. ``$GITHUB_TOKEN`` or ``$GH_TOKEN``
   2. the token of the GitHub CLI (``gh auth token``)
 A token is only needed for the (generous) authenticated rate limit; a public
-repository can also be queried anonymously, but expect throttling.
+repository can also be queried anonymously, but expect throttling. Under the
+`hbase` profile a token is also needed to read the Yetus run artifacts, which
+the GitHub Actions API serves.
 
 Examples
 --------
@@ -324,7 +326,10 @@ def parse_yetus_comment(pr: dict[str, Any], bots: Iterable[str]) -> YetusReport 
     for comment in comments:
         login = ((comment.get("author") or {}).get("login") or "").lower()
         if login in bot_names and "overall" in (comment.get("body") or ""):
-            latest = comment
+            # HBase's synthetic comments are appended newest first, after the
+            # PR's own comments: the last in the list is the oldest commit.
+            if latest is None or (comment.get("createdAt") or "") > (latest.get("createdAt") or ""):
+                latest = comment
     if latest is None:
         return None
 
