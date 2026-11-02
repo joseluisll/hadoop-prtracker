@@ -20,6 +20,7 @@ change is shown and confirmed one by one.
 | `qbt_jira.py` | Reads the nightly trunk qbt reports, ranks what they show by the open PRs fixing it would help, and proposes JIRA issues for the failures nobody tracks yet. Dry run only. |
 | `review_queue.py` | Lists every open PR into `apache/hadoop` per component (Maven module), yours and others', and recommends the top 10 to review. Read-only. |
 | `list_stale_branches.py` | Lists fork branches not related to any open PR (by history, JIRA key or earlier PRs) as STALE or CANDIDATE for cleanup. Read-only. |
+| `list_feat_branches.py` | Reports every `feat/` branch of the fork: the generated `<name>` branch against it, `<name>-upstream` against the generated one, and the PR; then the other upstream branches by PR state, stale staged tags and fork-only `.github/` changes. Read-only. |
 
 `analyze_pr.py` is the shared core; the others import it.
 
@@ -204,6 +205,7 @@ python fix_dependencies.py --add-link MAPREDUCE-7545:HADOOP-19972 --apply
 python create_jira.py 8704
 python create_jira.py 8704 --apply --assign-me
 python list_stale_branches.py
+python list_feat_branches.py
 python review_queue.py
 python review_queue.py --view recommend --explain
 python review_queue.py --view components --others --component hadoop-hdfs-rbf
@@ -291,10 +293,11 @@ cancels the waiting one.
 python tests/plan_smoke.py
 python tests/qbt_smoke.py
 python tests/review_smoke.py
+python tests/branches_smoke.py
 python tests/tui_smoke.py
 ```
 
-`plan_smoke.py`, `qbt_smoke.py` and `review_smoke.py` are offline. `tui_smoke.py` drives the UI headlessly against the live PRs
+`plan_smoke.py`, `qbt_smoke.py`, `review_smoke.py` and `branches_smoke.py` are offline. `tui_smoke.py` drives the UI headlessly against the live PRs
 (needs GitHub access) with every write stubbed out.
 
 GitHub Actions ([ci.yml](.github/workflows/ci.yml)) compiles every script, runs each one's
