@@ -23,6 +23,7 @@ change is shown and confirmed one by one.
 | `list_feat_branches.py` | Reports every `feat/` branch of the fork: the generated `<name>` branch against it, `<name>-upstream` against the generated one, and the PR; then the other upstream branches by PR state, stale staged tags and fork-only `.github/` changes. Read-only. |
 | `merge_preparation.py` | Merges `PREPARATION` into each `feat/` branch whose generated branch is on an older trunk, and with `--apply` pushes the merges. Dry run by default; conflicts are reported and left alone. |
 | `build_generated.py` | Requests a rebuild of each generated branch on an older trunk, from `staged/<name>`, by pushing `PREPARATION` to `build/<name>`. Skips what `build_upstream.yml` would refuse. Dry run unless `--apply`. |
+| `list_my_jiras.py` | Lists the unresolved JIRA issues you reported, each with its status and the Yetus, Build and approval state of its PR, whoever wrote the PR. Read-only. |
 
 `analyze_pr.py` is the shared core; the others import it.
 
@@ -212,6 +213,7 @@ python merge_preparation.py
 python merge_preparation.py --apply
 python build_generated.py
 python build_generated.py --apply
+python list_my_jiras.py
 python review_queue.py
 python review_queue.py --view recommend --explain
 python review_queue.py --view components --others --component hadoop-hdfs-rbf
@@ -302,10 +304,11 @@ python tests/review_smoke.py
 python tests/branches_smoke.py
 python tests/merge_smoke.py
 python tests/build_smoke.py
+python tests/jiras_smoke.py
 python tests/tui_smoke.py
 ```
 
-`plan_smoke.py`, `qbt_smoke.py`, `review_smoke.py`, `branches_smoke.py`, `merge_smoke.py` and `build_smoke.py` are offline. `tui_smoke.py` drives the UI headlessly against the live PRs
+`plan_smoke.py`, `qbt_smoke.py`, `review_smoke.py`, `branches_smoke.py`, `merge_smoke.py`, `build_smoke.py` and `jiras_smoke.py` are offline. `tui_smoke.py` drives the UI headlessly against the live PRs
 (needs GitHub access) with every write stubbed out.
 
 GitHub Actions ([ci.yml](.github/workflows/ci.yml)) compiles every script, runs each one's

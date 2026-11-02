@@ -64,6 +64,7 @@ query($q: String!, $after: String) {
         number
         title
         url
+        state
         isDraft
         createdAt
         updatedAt
@@ -93,6 +94,7 @@ query($q: String!, $after: String) {
           nodes {
             commit {
               oid
+              committedDate
               statusCheckRollup {
                 state
                 contexts(first: 100) {
