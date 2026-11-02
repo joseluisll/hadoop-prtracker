@@ -156,4 +156,20 @@ assert thirteen.endswith("| [Cancelled](https://example.org/runs/9), 2026-10-02 
                          "[+1](https://example.org/runs/10), 2026-10-02 |"), thirteen
 assert "older than tip" not in thirteen, thirteen
 assert not any("branch=HADOOP-12" in path for path in calls), calls
+
+# fork_verdict: Build and Yetus labels for every conclusion.
+for run, expected in [
+    ({"status": "waiting"}, "Awaiting approval to run"),
+    ({"status": "completed", "conclusion": "action_required"}, "Awaiting approval to run"),
+    ({"status": "completed", "conclusion": "skipped"}, "Skipped"),
+    ({"status": "completed", "conclusion": "neutral"}, "Neutral"),
+    ({"status": "completed", "conclusion": "stale"}, "Stale"),
+    ({"status": "completed", "conclusion": "timed_out"}, "Fail"),
+]:
+    assert lmj.fork_verdict(run) == expected, (run, expected)
+for run, expected in [
+    ({"status": "completed", "conclusion": "timed_out"}, "-1"),
+    ({"status": "completed", "conclusion": "action_required"}, "Awaiting approval to run"),
+]:
+    assert lmj.fork_verdict(run, yetus=True) == expected, (run, expected)
 print("jiras smoke ok")

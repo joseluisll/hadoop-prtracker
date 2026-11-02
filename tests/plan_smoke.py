@@ -60,4 +60,36 @@ pages = iter([{"pageInfo": {"hasNextPage": True, "endCursor": "c1"}, "nodes": [{
               {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": [{"number": 2}]}])
 core.graphql = lambda q, v, t: {"repository": {"pullRequests": next(pages)}}
 assert [p["number"] for p in core.fetch_open_prs("o/r", None)] == [1, 2]
+
+# R24: update_pr_body refuses when the login is unknown; matching login edits once.
+calls = []
+def fake_request_json(url, token, method="GET", payload=None, accept="application/json"):
+    calls.append((method, payload))
+    if method == "GET":
+        return 200, {"user": {"login": "someone"}, "body": "old"}
+    return 200, {"body": (payload or {}).get("body")}
+
+fd.request_json = fake_request_json
+fd.viewer_login = lambda t: None
+ok, msg = fd.update_pr_body("o/r", 1, lambda text: text + "\nnew", "t")
+assert not ok and not any(m == "PATCH" for m, _ in calls), (ok, msg, calls)
+calls.clear()
+fd.viewer_login = lambda t: "someone"
+ok, msg = fd.update_pr_body("o/r", 1, lambda text: text + "\nnew", "t")
+assert ok and [m for m, _ in calls] == ["GET", "PATCH"], (ok, msg, calls)
+
+# R33: the newest matching Yetus comment wins, in either list order.
+from list_upstream_prs import parse_yetus_comment
+comments = [
+    {"author": {"login": "hadoop-yetus"}, "createdAt": "2026-11-02T00:00:00Z",
+     "body": "**+1 overall**"},
+    {"author": {"login": "hadoop-yetus"}, "createdAt": "2026-11-01T00:00:00Z",
+     "body": "**-1 overall**"},
+]
+report = parse_yetus_comment({"comments": {"nodes": comments}}, ["hadoop-yetus"])
+assert report.overall == "+1", report.overall
+comments.reverse()
+report = parse_yetus_comment({"comments": {"nodes": comments}}, ["hadoop-yetus"])
+assert report.overall == "+1", report.overall
+
 print("plan_smoke: OK")

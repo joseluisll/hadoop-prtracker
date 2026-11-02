@@ -18,7 +18,7 @@ change is shown and confirmed one by one.
 | `fix_dependencies.py` | Writes the dependencies `analyze_pr.py` finds as JIRA "Blocker" links and as a managed block in the PR description. Proposes removing UNSUPPORTED and STALE ones. |
 | `create_jira.py` | For CI/Yetus failures no PR or JIRA addresses, proposes (and on `--apply`, creates) a new JIRA. |
 | `qbt_jira.py` | Reads the nightly trunk qbt reports, ranks what they show by the open PRs fixing it would help, and proposes JIRA issues for the failures nobody tracks yet. Dry run only. |
-| `review_queue.py` | Lists every open PR into `apache/hadoop` per component (Maven module), yours and others', and recommends the top 10 to review. Read-only. |
+| `review_queue.py` | Lists every open PR into `apache/hadoop:trunk` per component (Maven module), yours and others', and recommends the top 10 to review. Drafts are left out unless `--include-drafts`. Read-only. |
 | `list_stale_branches.py` | Lists fork branches not related to any open PR (by history, JIRA key or earlier PRs) as STALE or CANDIDATE for cleanup. Read-only. |
 | `list_feat_branches.py` | Reports every `feat/` branch of the fork: the generated `<name>` branch against it, `<name>-upstream` against the generated one, and the PR; then the other upstream branches by PR state, stale staged tags and fork-only `.github/` changes. Read-only. |
 | `merge_preparation.py` | Merges `PREPARATION` into each `feat/` branch whose generated branch is on an older trunk, and with `--apply` pushes the merges. Dry run by default; conflicts are reported and left alone. |
@@ -83,10 +83,12 @@ The proposals follow in the same order, with a priority. Every point is printed 
 | Only aggregate runs report it; its own module run is clean | -5 |
 
 P1 is 40 or more, P2 20 or more, P3 below. The weights are `POINTS` at the top of the script.
+Every candidate nobody works on is proposed, whatever its score (the -5 can take it below
+zero); `--min-score N` hides the proposals scoring below N.
 
 Nothing is created: `--save-dir DIR` writes each JIRA description (wiki markup) to a file and
 prints the `create_jira.py --project ... --summary ... --description-file ...` command that
-would file it once you have reviewed it.
+would file it once you have reviewed it, quoted for the shell it runs in (POSIX or Windows).
 
 ### Review queue
 
@@ -95,8 +97,9 @@ else's, grouped by component: the Maven module (nearest `pom.xml` in the clone's
 most of the PR's changed lines. Each row shows topic, author, files, changed lines, age, review
 state and the Yetus verdict of the latest commit (`stale` when it predates that commit).
 
-It then recommends the PRs where a review helps most. Your own PRs and drafts are never
-recommended. Every point is printed with its reason under `--explain`:
+It then recommends the PRs where a review helps most. Your own PRs are never recommended,
+and neither are drafts unless `--include-drafts` is given. Every point is printed with its
+reason under `--explain`:
 
 | Criterion | Points |
 | --- | --- |
@@ -129,7 +132,7 @@ Only main code counts: files under `src/test/`, `pom.xml` files and root files (
 module) are left out, so a test-only or build-only change adds nothing.
 
 `--focus NAME` (component or JIRA project, repeatable) replaces the learned area. The top N
-(`--top`, default 10) holds at most `--max-per-component` (default 3) PRs of one component, so
+(`--top`, default 10, at least 1) holds at most `--max-per-component` (default 3) PRs of one component, so
 one busy module does not fill the list. The weights are `POINTS` at the top of the script.
 
 Topic comes from the title, labels and paths (keywords such as CVE, fix, NPE, leak, race,
@@ -141,7 +144,9 @@ so treat it as a hint.
 `CONFIRMED`, `CI-FIX`, `LIKELY`, `WEAK`, `UNSUPPORTED`, `UNVERIFIED`, `DISCOVERED`, `STALE`, `MERGED`, `CLOSED`.
 
 A `CI-FIX` dependency becomes `STALE` when the failure it cleared is absent from the
-latest CI run, has not been seen for `--stale-days` (default 30) days, and at least one
+latest CI run, has not been seen for `--stale-days` days (default 30 in
+`fix_dependencies.py`; `analyze_pr.py` and `list_upstream_prs.py` default to 14 and mean
+PR inactivity, and `analyze_pr.py` has no flag for the 30-day CI window), and at least one
 green run of the same check has happened since. A dependency on a PR that is no longer
 open is `MERGED` or `CLOSED`, whatever its evidence: it leaves the description block, and
 its JIRA link is kept as history.
@@ -156,7 +161,9 @@ pip install -r requirements.txt
 
 Credentials come only from the environment, never from files in this repository:
 
-- **GitHub**: `gh auth login`, or `GITHUB_TOKEN`. `--token` overrides both.
+- **GitHub**: `gh auth login`, or `GITHUB_TOKEN`. `--token` overrides both. Under
+  `hbase`, a token is also needed to read the Yetus run artifacts from the GitHub Actions
+  API.
 - **JIRA** (only for writes): a personal access token for issues.apache.org in
   `JIRA_TOKEN` or `JIRA_PAT`. Reads work without it.
 
@@ -187,8 +194,9 @@ For each PR the scripts download those zips into `prtracker-yetus` in the temp d
 reports as one Yetus comment, so the status, the precommit history and the CI-fix dependencies
 work as for Hadoop. One PR is read over its last 3 commits, a list of PRs over the latest only.
 A zip is downloaded once (cached by artifact id); a passing unit wave's zip (up to 60 MB, every
-test's output) is not downloaded at all. The GitHub API calls still take a few seconds per PR,
-so `review_queue.py` and `qbt_jira.py` over all open HBase PRs take a few minutes.
+test's output) is not downloaded at all. Reading those artifacts needs a GitHub token; without
+one the scripts warn and report no Yetus result. The GitHub API calls still take a few seconds
+per PR, so `review_queue.py` and `qbt_jira.py` over all open HBase PRs take a few minutes.
 
 HBase's nightly runs the unit tests of the whole tree in one go, so `qbt_jira.py` puts a failed
 plugin goal or fork timeout on the project its unit log names (`hbase-server`), and also lists
@@ -244,7 +252,8 @@ branch, `main`), and checks out the project's base branch (latest commit only) a
 without which a symbol already on trunk looks like one another PR introduces. It needs:
 
 - the secret `PREPARATION_PUSH_TOKEN`: a classic personal access token with the `public_repo` scope.
-  Only PRs opened by its owner are edited, as with every write of `fix_dependencies.py`. Without
+  Only PRs opened by its owner are edited, as with every write of `fix_dependencies.py`, and
+  nothing is edited when the token's owner cannot be read. Without
   it the run fails, and nothing is edited.
 - optionally the variable `PRTRACKER_PROFILE` (`hbase`; default `hadoop`).
 
@@ -290,27 +299,32 @@ cancels the waiting one.
 - **Dry run by default.** Without `--apply` the scripts only print what they would change.
 - **`--apply`** asks for a yes/no on every JIRA link, PR-body edit and new issue.
 - **`--force`** (only together with `--apply`) answers yes instead of asking; each change is
-  still printed before it is written. In `create_jira.py` an issue that may already be filed
-  is skipped rather than created.
+  still printed before it is written. In `create_jira.py` an issue that may already be filed,
+  or whose duplicate search failed, is skipped rather than created.
 - Missing JIRAs are reported, never created implicitly by the dependency tools.
-- `review_queue.py` has no write mode: it only runs GraphQL queries and `git ls-tree`/`git log`.
+- `review_queue.py` has no write mode: it only runs GraphQL queries, git read commands and,
+  under `hbase`, read-only GitHub Actions REST calls for the Yetus artifacts.
 - `qbt_jira.py` has no write mode: it only proposes, and leaves filing to `create_jira.py`.
 
 ## Tests
 
 ```bash
 python tests/plan_smoke.py
+python tests/graph_smoke.py
 python tests/qbt_smoke.py
 python tests/review_smoke.py
 python tests/branches_smoke.py
 python tests/merge_smoke.py
 python tests/build_smoke.py
 python tests/jiras_smoke.py
+python tests/create_smoke.py
 python tests/tui_smoke.py
 ```
 
-`plan_smoke.py`, `qbt_smoke.py`, `review_smoke.py`, `branches_smoke.py`, `merge_smoke.py`, `build_smoke.py` and `jiras_smoke.py` are offline. `tui_smoke.py` drives the UI headlessly against the live PRs
-(needs GitHub access) with every write stubbed out.
+`plan_smoke.py`, `graph_smoke.py`, `qbt_smoke.py`, `review_smoke.py`, `branches_smoke.py`,
+`merge_smoke.py`, `build_smoke.py`, `jiras_smoke.py` and `create_smoke.py` are offline.
+`tui_smoke.py` drives the UI headlessly against the live PRs (needs GitHub access) with
+every write stubbed out.
 
 GitHub Actions ([ci.yml](.github/workflows/ci.yml)) compiles every script, runs each one's
 `--help` and runs the offline smoke tests on Ubuntu and Windows for every pull request into `main`.

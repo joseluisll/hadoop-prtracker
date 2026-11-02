@@ -11,9 +11,11 @@ seen, the report, the classes and bug types spotbugs names.
 The same failure seen by several PRs is one issue. Unresolved issues of the
 project with the same test or class in their summary are shown as possible
 duplicates, searched again right before each write; creating one anyway is
-asked for even with --force, which skips it instead. Nothing else is touched: no link to your issues, no PR edit. After a
-creation the script prints the --add-link command that would record the
-dependency, for you to run if you want it.
+asked for even with --force, which skips it instead. A duplicate search that
+failed counts as "may be filed" and is also skipped under --force. Nothing
+else is touched: no link to your issues, no PR edit. After a creation the
+script prints the --add-link command that would record the dependency, for
+you to run if you want it.
 
 A single issue can also be given by hand with --project and --summary.
 
@@ -142,12 +144,15 @@ def search_words(proposal: dict[str, Any]) -> list[str]:
     return words[0] if words else [proposal["summary"]]
 
 
-def already_filed(jira_base: str, proposal: dict[str, Any]) -> list[dict[str, str]]:
-    """Unresolved issues of the project whose summary has the same words."""
+def already_filed(jira_base: str, proposal: dict[str, Any]) -> list[dict[str, str]] | None:
+    """Unresolved issues of the project whose summary has the same words, or None if the
+    search failed: a failed search cannot prove there is no duplicate."""
     terms = " AND ".join(f'summary ~ "\\"{w}\\""' for w in search_words(proposal))
     jql = f"project = {proposal['project']} AND resolution = Unresolved AND {terms}"
     data = core.jira_get(jira_base, "search",
-                         {"jql": jql, "fields": "summary,status", "maxResults": "5"}) or {}
+                         {"jql": jql, "fields": "summary,status", "maxResults": "5"})
+    if data is None:
+        return None
     return [{"key": i.get("key", ""), "summary": (i.get("fields") or {}).get("summary", "")}
             for i in data.get("issues") or []]
 
@@ -204,7 +209,9 @@ def show(proposal: dict[str, Any], index: int, total: int, args: argparse.Namesp
     print("    description:")
     for line in proposal["description"].splitlines():
         print(f"      {line}")
-    for issue in proposal.get("duplicates", []):
+    if proposal.get("duplicates") is None:
+        print("    the duplicate search failed: this may be filed already")
+    for issue in proposal.get("duplicates") or []:
         print(f"    possible duplicate: {issue['key']} {issue['summary']} "
               f"({args.jira_base.rstrip('/')}/browse/{issue['key']})")
 
@@ -230,7 +237,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="offer to create the issues (each one is still asked for)")
     parser.add_argument("--force", action="store_true",
                         help="with --apply: answer yes to every issue instead of asking "
-                             "(each one is still printed before it is created)")
+                             "(each one is still printed before it is created); never "
+                             "answers when a duplicate may exist or its search failed")
     parser.add_argument("--repo", default=core.DEFAULT_REPO)
     parser.add_argument("--jira-base", default=core.DEFAULT_JIRA)
     parser.add_argument("--repo-path", default=None)
@@ -273,9 +281,11 @@ def main(argv: list[str] | None = None) -> int:
         proposal["duplicates"] = already_filed(args.jira_base, proposal)
     print(f"\n{len(proposals)} JIRA issue(s) to create:")
     for proposal in proposals:
+        duplicates = proposal["duplicates"]
         print(f"  {proposal['project']}: {proposal['summary']}"
-              + (f"  - possible duplicate of {join([d['key'] for d in proposal['duplicates']])}"
-                 if proposal["duplicates"] else ""))
+              + ("  - duplicate search failed" if duplicates is None else
+                 f"  - possible duplicate of {join([d['key'] for d in duplicates])}"
+                 if duplicates else ""))
 
     if not args.apply:
         for index, proposal in enumerate(proposals, 1):
@@ -292,8 +302,17 @@ def main(argv: list[str] | None = None) -> int:
     for index, proposal in enumerate(proposals, 1):
         show(proposal, index, len(proposals), args)
         # Searched again right before the write: somebody may have filed it.
-        proposal["duplicates"] = already_filed(args.jira_base, proposal)
-        if proposal["duplicates"]:
+        duplicates = already_filed(args.jira_base, proposal)
+        proposal["duplicates"] = duplicates
+        if duplicates is None:
+            # A failed search cannot prove there is no duplicate: --force never
+            # answers this one.
+            if args.force:
+                print("    skipped - the duplicate search failed; without --force you are asked")
+                skipped += 1
+                continue
+            question = "the duplicate search failed - create it anyway?"
+        elif duplicates:
             # A duplicate is public and outlives a mistake: --force never
             # answers this one.
             if args.force:

@@ -401,9 +401,13 @@ def plan_for(
 
     # ----- the pull request description -------------------------------------- #
     owner = author_of(pr)
-    if not jira_only and me and owner and owner != me.lower():
-        notes.append(f"#{number} was opened by {owner}: its description is not edited here - "
-                     "only your side of each dependency is written, in your own PRs")
+    if not jira_only and (not me or not owner or owner != me.lower()):
+        if me and owner:
+            notes.append(f"#{number} was opened by {owner}: its description is not edited here - "
+                         "only your side of each dependency is written, in your own PRs")
+        else:
+            notes.append(f"#{number}: the PR author or your login is unknown, so its "
+                         "description is not edited")
     elif not jira_only:
         for section, entries in (("depends", depends), ("required", required)):
             known = {e["ref"] for e in entries}
@@ -626,7 +630,10 @@ def update_pr_body(repo: str, number: int, edit: Callable[[str], str],
         return False, f"could not re-read #{number} ({status}): {payload}"
     owner = ((payload.get("user") or {}) or {}).get("login") or ""
     me = viewer_login(token)
-    if me and owner.lower() != me.lower():
+    if not me:
+        return False, (f"who the GitHub token belongs to is unknown: refusing to edit the "
+                       f"description of #{number}")
+    if owner.lower() != me.lower():
         return False, (f"#{number} was opened by {owner}, not by {me}: its description is "
                        f"theirs to edit - nothing written")
     current = (payload.get("body") or "").replace("\r\n", "\n")

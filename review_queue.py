@@ -7,13 +7,15 @@ with a pom.xml above each changed file, read from its trunk with git ls-tree);
 a PR is filed under the module with most of its changed lines, and lists the
 others it touches. Without a clone the module is the path before "src/".
 
-*Read-only, always.* The script only runs GraphQL queries against GitHub and
-git read commands against the clone; it has no write mode.
+*Read-only, always.* The script only runs GraphQL queries against GitHub, git
+read commands against the clone and, under `hbase`, read-only GitHub Actions
+REST calls for the Yetus artifacts; it has no write mode.
 
 Priority
 --------
-Your own PRs and drafts are never recommended. Every other PR gets points,
-all shown with the reason (--explain):
+Your own PRs are never recommended, and neither are drafts unless
+--include-drafts is given. Every other PR gets points, all shown with the
+reason (--explain):
 
     size (changed lines)     <= 20  +20   <= 100 +15   <= 300 +10
                              <= 1000 +4   larger 0
@@ -53,7 +55,7 @@ the reliable part: GitHub shows most Hadoop committers as CONTRIBUTOR,
 because their membership of the apache organization is private. The PR's
 author and you do not count.
 
-The top N (default 10) is taken in score order with at most
+The top N (--top, default 10, at least 1) is taken in score order with at most
 --max-per-component PRs (default 3) from one component, so one busy module
 does not fill the whole list.
 
@@ -522,7 +524,7 @@ def recommend(entries: list[Entry], top: int, per_component: int,
             continue
         taken[entry.component] = taken.get(entry.component, 0) + 1
         picked.append(entry)
-        if len(picked) == top:
+        if len(picked) >= top:
             break
     return picked
 
@@ -635,7 +637,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     who.add_argument("--others", action="store_true", help="list only other people's PRs")
     parser.add_argument("--component", action="append", default=[], metavar="NAME",
                         help="only PRs touching this component or JIRA project (repeatable)")
-    parser.add_argument("--top", type=int, default=10, help="PRs to recommend (default: 10)")
+    parser.add_argument("--top", type=int, default=10,
+                        help="PRs to recommend, at least 1 (default: 10)")
     parser.add_argument("--max-per-component", type=int, default=3,
                         help="recommendations from one component at most (default: 3)")
     parser.add_argument("--focus", action="append", default=[], metavar="NAME",
@@ -662,7 +665,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                              "instead of GitHub; offline, so committers come only from "
                              "--committer and the associations in the file")
     parser.add_argument("--token", default=None, help="GitHub token (else $GITHUB_TOKEN or gh)")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.top < 1:
+        parser.error("--top must be at least 1")
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:

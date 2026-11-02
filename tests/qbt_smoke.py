@@ -334,4 +334,38 @@ try:
 finally:
     q.core.use_profile("hadoop")
 assert q.core.new_jira_summary({"test": "hadoop.yarn.TestX"}) == "YARN: TestX fails on trunk"
+
+# R80: --min-score defaults to None; with it, low scores are hidden.
+assert q.parse_args([]).min_score is None
+assert q.parse_args(["--min-score", "5"]).min_score == 5
+
+# The printed command keeps a summary with $HOME and a backtick intact.
+import shlex, tempfile
+with tempfile.TemporaryDirectory() as tmp:
+    commands = q.save([{"project": "HADOOP", "summary": "Fix `$HOME` bug", "tier": "P1",
+                        "description": "x", "record": {}}], tmp)
+    assert len(commands) == 1
+    assert "Fix `$HOME` bug" in shlex.split(commands[0])
+
+# R80 through main: an untracked candidate scoring -3 is proposed unless --min-score hides it.
+import contextlib, io, json
+low = {"kind": "test", "module": "root"}
+q.resolve_token = lambda token: None
+q.job_builds = lambda jenkins, job, history, build: [{"number": 1}]
+q.read_build = lambda job, build, latest: {"number": 1, "date": "2026-11-02"}
+q.vote_of = lambda run: "-1"
+q.source_modules = lambda path: {}
+q.build_candidates = lambda runs, modules, lint: [dict(low)]
+q.fetch_open_prs = lambda repo, days, token: []
+q.history = q.pr_impact = lambda *a: None
+q.summary_of = lambda entry, runs: ("HADOOP", "TestLow fails on trunk")
+q.tracking = lambda *a: {"prs": [], "jiras": [], "related": []}
+q.score = lambda entry: (-3, "P3", [])
+q.helps = lambda entry: []
+q.describe = lambda entry, runs: "d"
+for extra, expected in (([], 1), (["--min-score", "0"], 0)):
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        q.main(["--job", "qbt", "--format", "json", *extra])
+    assert len(json.loads(out.getvalue())["proposals"]) == expected, (extra, out.getvalue())
 print("qbt_smoke: OK")
