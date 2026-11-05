@@ -29,7 +29,7 @@ import sys
 from typing import Any
 
 import analyze_pr as core
-from list_feat_branches import FORK, STAGED_REFS, UPSTREAM, newest, pr_link, read_tip
+from list_feat_branches import FORK, STAGED_REFS, UPSTREAM, fork_owned, newest, pr_link, read_tip
 from list_my_jiras import fork_run, fork_verdict, prs_of
 from list_stale_branches import Git, search_prs
 from list_upstream_prs import DEFAULT_FORK_OWNER, resolve_token
@@ -64,8 +64,8 @@ def yetus_tested(fork: str, tip: str | None, run: dict[str, Any], token: str | N
                for s in statuses)
 
 
-def status(git: Git, name: str, prs: list[dict[str, Any]], repo: str,
-           token: str | None) -> list[str]:
+def status(git: Git, name: str, prs: list[dict[str, Any]], repo: str, token: str | None,
+           owned: list[str] | None = None) -> list[str]:
     """The lines describing one feature, the next action last."""
     fork = slug(git, FORK)  # owner/name, for the GitHub API
     trunk = f"{UPSTREAM}/{core.BASE}"
@@ -74,7 +74,8 @@ def status(git: Git, name: str, prs: list[dict[str, Any]], repo: str,
         return [f"feat/{name}: not on {fork}",
                 f"NEXT: git push origin feat/{name}"]
 
-    feat = read_tip(git, feat_ref, trunk)
+    owned = owned or fork_owned(git)  # the fork's own paths, which no branch is behind on
+    feat = read_tip(git, feat_ref, trunk, owned)
     prep = f"{FORK}/PREPARATION"
     ahead = git.count(f"{feat_ref}..{prep}")
     lines = [f"feat/{name}: {feat.sha[:12]}, base {feat.behind} behind {trunk}, "
@@ -91,7 +92,7 @@ def status(git: Git, name: str, prs: list[dict[str, Any]], repo: str,
     staged_ref = f"{STAGED_REFS}/{name}"
     staged = staged_same = None
     if core.has_commit(git.cwd, staged_ref):
-        staged = read_tip(git, staged_ref, trunk)
+        staged = read_tip(git, staged_ref, trunk, owned)
         staged_same = staged.change == feat.change
         lines.append(f"staged/{name}: {staged.sha[:12]}, "
                      f"{'same code as feat/' if staged_same else 'DIFFERS from feat/'}")
@@ -103,7 +104,8 @@ def status(git: Git, name: str, prs: list[dict[str, Any]], repo: str,
         steps.append("restage")  # build/<head> fails without a staged commit
 
     head_ref = f"{FORK}/{head}"
-    generated = read_tip(git, head_ref, trunk) if core.has_commit(git.cwd, head_ref) else None
+    generated = (read_tip(git, head_ref, trunk, owned)
+                 if core.has_commit(git.cwd, head_ref) else None)
     if generated is None:
         lines.append(f"{head}: not on {fork} yet")
         steps.append("publish")
@@ -131,6 +133,11 @@ def status(git: Git, name: str, prs: list[dict[str, Any]], repo: str,
     if not by_workflow:
         # build/<name> cannot publish this head, so it is behind until pushed by hand.
         lines.append(f"  build/<name> does not publish {head}: push it by hand")
+    # Only matters when feat/ would be pushed: a push runs its own workflow copy.
+    if staging_is_broken(git, feat_ref) and (steps or not ahead):
+        lines.append("  its staging workflow still reads fork-owned.sh, which PREPARATION dropped: "
+                     "merge PREPARATION first")
+        steps.append("staging-broken")
     if pr is None:
         lines.append("PR: none")
         steps.append("open-pr")
@@ -149,6 +156,17 @@ def status(git: Git, name: str, prs: list[dict[str, Any]], repo: str,
     return lines + [f"NEXT: {next_step(name, head, steps, by_workflow)}"]
 
 
+def staging_is_broken(git: Git, feat_ref: str) -> bool:
+    """Whether the branch's own staging workflow still reads the removed fork-owned.sh.
+
+    The workflow copies both scripts out of PREPARATION, which no longer carries
+    fork-owned.sh, so its next push to feat/ fails before staging anything.
+    """
+    workflow = f"{feat_ref}:.github/workflows/upstream_branch.yml"
+    return bool(core.git_run(git.cwd, "cat-file", "-e", workflow)[0] == 0
+                and "fork-owned" in git.run("show", workflow))
+
+
 def next_step(feat_name: str, head: str, steps: list[str], by_workflow: bool = True) -> str:
     """The one action the fork's workflows expect next.
 
@@ -161,6 +179,8 @@ def next_step(feat_name: str, head: str, steps: list[str], by_workflow: bool = T
         if "publish" in steps:
             return f"{head} is behind feat/{feat_name}: push it by hand, then re-run the checks"
         return "green and published: ask for a review"
+    if "staging-broken" in steps:
+        return "git merge origin/PREPARATION   (its staging workflow reads a script PREPARATION no longer has)"
 
     if "restage" in steps:  # the staged tag, and so build/<head>, is missing or older
         return f"git push origin feat/{feat_name}   (stage it; then publish)"
@@ -218,8 +238,9 @@ def main(argv: list[str] | None = None) -> int:
     token = resolve_token(args.token)
     prs = authored_prs(core.DEFAULT_REPO, args.author, token)
     names = feat_names(git) if args.all else [args.name.removeprefix("feat/")]
+    owned = fork_owned(git)
     for name in names:
-        lines = status(git, name, prs, core.DEFAULT_REPO, token)
+        lines = status(git, name, prs, core.DEFAULT_REPO, token, owned)
         print(f"{name}: {lines[-1].removeprefix('NEXT: ')}" if args.all else "\n".join(lines))
     return 0
 

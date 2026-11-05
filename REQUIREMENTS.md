@@ -369,7 +369,8 @@ token (default login `joseluisll`).
 
 - **R97** `list_feat_branches.py` shall compare, for each `feat/<name>`, the generated
   `<name>` branch with it and `<name>-upstream` with the generated one, as "same code"
-  when they change the same lines outside `.github/` over their own trunk merge-base,
+  when they change the same lines outside the fork-owned paths `.github/FORK-OWNED` of
+  `PREPARATION` lists (only `.github/` when it does not) over their own trunk merge-base,
   with how far each base is behind, and name the PR. *Source:* `read_tip`, `report`.
 - **R98** It shall then list the other fork branches by PR state, and note staged tags
   behind or with other code, fork-only `.github/` changes, PR heads out of date and
@@ -381,6 +382,11 @@ token (default login `joseluisll`).
   `git commit-tree` (no worktree or local branch touched), report conflicts and leave
   those branches alone, flag `.github/`-only merges, and push only with `--apply`.
   *Source:* `merge_branch`, `behind_branches`.
+- **R101a** Every script comparing branches shall read the fork-owned paths from
+  `.github/FORK-OWNED` on `PREPARATION`, not `.github/` alone: the staging workflow drops
+  them from the upstream commit, so a branch carrying them is not "other code".
+  *Source:* `fork_owned`, `read_tip`.
+
 - **R101** `build_generated.py` shall push `PREPARATION` to `build/<name>` for those
   same branches, only with `--apply`, and skip, saying why, when a request is pending,
   `staged/<name>` is missing, holds other code than `feat/<name>` or is no newer, or

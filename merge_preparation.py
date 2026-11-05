@@ -25,13 +25,13 @@ import argparse
 import sys
 
 import analyze_pr as core
-from list_feat_branches import FORK, NO_GITHUB, UPSTREAM
+from list_feat_branches import FORK, UPSTREAM, fork_owned
 from list_stale_branches import Git
 
 PREPARATION = f"{FORK}/PREPARATION"
 
 
-def merge_branch(git: Git, name: str, apply: bool) -> tuple[str, bool]:
+def merge_branch(git: Git, name: str, apply: bool, owned: list[str] | None = None) -> tuple[str, bool]:
     """Merge PREPARATION into feat/<name>; return what happened and whether it went well."""
     feat = f"{FORK}/feat/{name}"
     missing = git.count(f"{feat}..{PREPARATION}")
@@ -47,8 +47,10 @@ def merge_branch(git: Git, name: str, apply: bool) -> tuple[str, bool]:
         return f"merge failed ({status}): {out[:200]}", False
 
     tree = lines[0]
-    only_github = not git.lines("diff", "--name-only", feat, tree, "--", NO_GITHUB)
-    detail = f"{missing} commits" + (", .github/ only: starts no workflow" if only_github else "")
+    # The fork's own paths only: such a merge starts no staging workflow.
+    owned = owned or fork_owned(git)
+    fork_only = not git.lines("diff", "--name-only", feat, tree, "--", *owned)
+    detail = f"{missing} commits" + (", fork-owned files only: starts no workflow" if fork_only else "")
     if not apply:
         return f"would merge {detail}", True
     commit = git.run("commit-tree", tree, "-p", feat, "-p", PREPARATION,
@@ -80,9 +82,10 @@ def behind_branches(git: Git) -> list[tuple[str, int]]:
 def merge_all(git: Git, apply: bool) -> bool:
     """Report on each picked branch; return whether all went well."""
     picked = behind_branches(git)
+    owned = fork_owned(git)
     fine = True
     for name, behind in picked:
-        result, went_well = merge_branch(git, name, apply)
+        result, went_well = merge_branch(git, name, apply, owned)
         fine = fine and went_well
         print(f"feat/{name} (generated base {behind} behind): {result}")
     if not picked:
