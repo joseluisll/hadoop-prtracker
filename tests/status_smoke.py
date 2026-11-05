@@ -77,4 +77,47 @@ with tempfile.TemporaryDirectory() as tmp:
     # A head build/<name> cannot publish, and feat/HARNESS, say so instead.
     assert "by hand" in pr_status.next_step("HADOOP-2", "jetty-phase-a", ["publish"], False)
     assert "HARNESS" in pr_status.next_step("HARNESS", "HARNESS", [])
+    # A branch whose workflow still reads fork-owned.sh must merge PREPARATION first.
+    assert "merge origin/PREPARATION" in pr_status.next_step(
+        "HADOOP-2", "HADOOP-2", ["staging-broken"])
 print("pr_status smoke test passed")
+
+# Fork-owned paths (.github/FORK-OWNED) are left out of the comparison, as the
+# staging workflow leaves them out of the upstream commit.
+with tempfile.TemporaryDirectory() as tmp:
+    repo = os.path.join(tmp, "repo")
+    os.mkdir(repo)
+
+    def git(*args):
+        return subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+
+    def commit(path, text):
+        full = os.path.join(repo, path)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "w") as f:
+            f.write(text)
+        git("add", "-A")
+        git("commit", "-qm", path)
+        return git("rev-parse", "HEAD")
+
+    git("init", "-q")
+    git("config", "user.name", "t")
+    git("config", "user.email", "t@t")
+    trunk = commit("a.txt", "1\n")
+    git("update-ref", "refs/remotes/upstream/trunk", trunk)
+    git("checkout", "-q", "-b", "prep", trunk)
+    prep = commit(".github/FORK-OWNED", ".github\ndev-support/harness\n")
+    # A branch that only has the fork's own paths is the same code as one without them.
+    with_harness = commit("dev-support/harness/x.txt", "harness\n")
+    git("update-ref", "refs/remotes/origin/PREPARATION", prep)
+    git("update-ref", "refs/remotes/origin/feat/HADOOP-1", with_harness)
+    git("update-ref", "refs/prtracker/staged/HADOOP-1", prep)  # what the stager would publish
+
+    owned = pr_status.fork_owned(Git(repo))
+    assert ":(top,exclude)dev-support/harness" in owned, owned
+    feat = pr_status.read_tip(Git(repo), "refs/remotes/origin/feat/HADOOP-1",
+                              "refs/remotes/upstream/trunk", owned)
+    staged = pr_status.read_tip(Git(repo), "refs/prtracker/staged/HADOOP-1",
+                                "refs/remotes/upstream/trunk", owned)
+    assert feat.change == staged.change, (feat.change, staged.change)
+print("fork-owned excludes ok")

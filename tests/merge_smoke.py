@@ -62,7 +62,7 @@ with tempfile.TemporaryDirectory() as tmp:
 
     fine, text = run(False)
     assert not fine, text  # the conflict
-    assert "feat/HADOOP-1 (generated base 1 behind): would merge 2 commits, .github/ only" in text, text
+    assert "feat/HADOOP-1 (generated base 1 behind): would merge 2 commits, fork-owned files only" in text, text
     assert "feat/HADOOP-2 (generated base 1 behind): CONFLICT in .github/w.yml" in text, text
     assert "feat/HADOOP-3 (generated base 1 behind): already has PREPARATION" in text, text
     assert "HADOOP-4" not in text and "HARNESS" not in text, text
