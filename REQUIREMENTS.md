@@ -403,6 +403,16 @@ token (default login `joseluisll`).
 
 ## 16. Automation (GitHub Actions)
 
+- **R112** `pr_status.py` shall report, for one `<name>`: the `feat/<name>` tip, its
+  trunk base and whether PREPARATION is ahead; what `staged/<name>` holds against it; the
+  branch the PR is opened from against it; the fork's newest Build run on that branch and
+  Yetus run on `yetus/<name>`, saying when they did not test the branch tip; and the PR.
+  It shall end with one next action in workflow order: push `feat/`, publish
+  (`build/<head>`), open the PR, fix a red Build, run Yetus (`yetus/<head>`), or done, and
+  say instead when `build/<name>` cannot publish the head (the `jetty-phase-*` PRs). `--all`
+  shall print that line for every `feat/` branch; `feat/HARNESS` has nothing to publish.
+  Read-only. *Source:* `status`, `next_step`, `feat_names`.
+
 - **R103** CI shall run on pull requests and pushes to `main`, on Ubuntu and Windows
   with Python 3.12: compile every script, run each script's `--help`, and run the
   offline smoke tests (`plan`, `graph`, `qbt`, `review`, `branches`, `merge`, `build`,
