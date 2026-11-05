@@ -23,6 +23,7 @@ change is shown and confirmed one by one.
 | `list_feat_branches.py` | Reports every `feat/` branch of the fork: the generated `<name>` branch against it, `<name>-upstream` against the generated one, and the PR; then the other upstream branches by PR state, stale staged tags and fork-only `.github/` changes. Read-only. |
 | `merge_preparation.py` | Merges `PREPARATION` into each `feat/` branch whose generated branch is on an older trunk, and with `--apply` pushes the merges. Dry run by default; conflicts are reported and left alone. |
 | `build_generated.py` | Requests a rebuild of each generated branch on an older trunk, from `staged/<name>`, by pushing `PREPARATION` to `build/<name>`. Skips what `build_upstream.yml` would refuse. Dry run unless `--apply`. |
+| `pr_status.py` | Where one feature stands: its `feat/` branch, the staged commit, the branch the PR is opened from, the fork's Build and Yetus runs, and the PR, then the one next action the fork's workflows expect. `--all` prints that line for every `feat/` branch. Read-only. |
 | `list_my_jiras.py` | Lists the unresolved JIRA issues you reported, each with its status and the Yetus, Build and approval state of its PR, whoever wrote the PR, plus the fork's own Build and Yetus runs on the issue's branch. Read-only. |
 
 `analyze_pr.py` is the shared core; the others import it.
@@ -221,6 +222,8 @@ python merge_preparation.py
 python merge_preparation.py --apply
 python build_generated.py
 python build_generated.py --apply
+python pr_status.py HADOOP-19972
+python pr_status.py --all
 python list_my_jiras.py
 python list_my_jiras.py --fork somebody/hadoop
 python review_queue.py
