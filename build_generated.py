@@ -27,12 +27,13 @@ import sys
 
 import analyze_pr as core
 from analyze_pr import is_ancestor
-from list_feat_branches import FORK, STAGED_REFS, UPSTREAM, read_tip
+from list_feat_branches import FORK, STAGED_REFS, UPSTREAM, fork_owned, read_tip
 from list_stale_branches import Git
 from merge_preparation import PREPARATION, behind_branches
 
 
-def request_build(git: Git, name: str, behind: int, apply: bool) -> tuple[str, bool]:
+def request_build(git: Git, name: str, behind: int, apply: bool,
+                  owned: list[str] | None = None) -> tuple[str, bool]:
     """Request the publishing of staged/<name>; return what happened and whether it went well."""
     trunk = f"{UPSTREAM}/{core.BASE}"
     feat, generated, staged = f"{FORK}/feat/{name}", f"{FORK}/{name}", f"{STAGED_REFS}/{name}"
@@ -40,8 +41,8 @@ def request_build(git: Git, name: str, behind: int, apply: bool) -> tuple[str, b
         return "build/ request already pending", True
     if not core.has_commit(git.cwd, staged):
         return f"SKIPPED, no staged/{name}: push feat/{name} first", False
-    tag = read_tip(git, staged, trunk)
-    if tag.change != read_tip(git, feat, trunk).change:
+    tag = read_tip(git, staged, trunk, owned)
+    if tag.change != read_tip(git, feat, trunk, owned).change:
         return f"SKIPPED, staged/{name} has other code than feat/{name}", False
     if tag.behind >= behind:
         return f"SKIPPED, staged/{name} is no newer (base {tag.behind} behind)", False
@@ -60,9 +61,10 @@ def request_build(git: Git, name: str, behind: int, apply: bool) -> tuple[str, b
 def build_all(git: Git, apply: bool) -> bool:
     """Report on each picked branch; return whether all went well."""
     picked = behind_branches(git)
+    owned = fork_owned(git)  # the fork's own paths, as the staging workflow drops them
     fine = True
     for name, behind in picked:
-        result, went_well = request_build(git, name, behind, apply)
+        result, went_well = request_build(git, name, behind, apply, owned)
         fine = fine and went_well
         print(f"{name} (base {behind} behind): {result}")
     if not picked:

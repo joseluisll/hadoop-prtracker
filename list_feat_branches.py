@@ -34,6 +34,19 @@ from list_upstream_prs import DEFAULT_FORK_OWNER, resolve_token
 
 STAGED_REFS = "refs/prtracker/staged"
 NO_GITHUB = ":(top,exclude).github"
+# The fork's own paths, read from .github/FORK-OWNED: the fork keeps them, the
+# staging workflow leaves them out of the upstream commit, so comparing two
+# branches must leave them out too. Only .github/ when there is no list yet.
+FORK_OWNED_REF = f"{FORK}/PREPARATION"
+
+
+def fork_owned(git: Git) -> list[str]:
+    """The pathspecs .github/FORK-OWNED of PREPARATION claims, as git excludes (only .github/ by default)."""
+    status, text = core.git_run(git.cwd, "show", f"{FORK_OWNED_REF}:.github/FORK-OWNED")
+    prefixes = [] if status else [
+        line.strip() for line in text.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")]
+    return [f":(top,exclude){prefix}" for prefix in prefixes] or [NO_GITHUB]
 
 
 @dataclass
@@ -44,13 +57,14 @@ class Tip:
     base: str
     behind: int  # commits of trunk its base is missing
     commits: int
-    change: list[str]  # what it changes outside .github/, sorted
+    change: list[str]  # what it changes outside the fork-owned paths, sorted
     github_files: int
 
 
-def read_tip(git: Git, ref: str, trunk: str) -> Tip:
+def read_tip(git: Git, ref: str, trunk: str, owned: list[str] | None = None) -> Tip:
+    owned = owned or fork_owned(git)
     base = git.run("merge-base", trunk, ref).strip()
-    diff = git.lines("diff", base, ref, "--", NO_GITHUB)
+    diff = git.lines("diff", base, ref, "--", *owned)
     change = sorted(line for line in diff if line.startswith(("diff --git", "+", "-"))
                     and not line.startswith(("+++", "---")))
     return Tip(
@@ -95,6 +109,7 @@ def newest(prs: list[dict[str, Any]]) -> dict[str, Any] | None:
 
 def report(git: Git, prs: list[dict[str, Any]], owner: str) -> str:
     trunk = f"{UPSTREAM}/{core.BASE}"
+    owned = fork_owned(git)
     prs = [pr for pr in prs
            if ((pr.get("headRepositoryOwner") or {}).get("login") or "").lower() == owner.lower()]
     by_head: dict[str, list[dict[str, Any]]] = {}
@@ -121,13 +136,13 @@ def report(git: Git, prs: list[dict[str, Any]], owner: str) -> str:
     with_pr = 0
     behind_tags, tag_differs, github_files = [], [], []
     for name in sorted(n[len("feat/"):] for n in shas if n.startswith("feat/")):
-        feat = read_tip(git, f"{FORK}/feat/{name}", trunk)
+        feat = read_tip(git, f"{FORK}/feat/{name}", trunk, owned)
         shown.add(f"feat/{name}")
         generated = upstream = None
         vs_feat, gen_commits = "No generated branch", "–"
         if name in shas:
             shown.add(name)
-            generated = read_tip(git, f"{FORK}/{name}", trunk)
+            generated = read_tip(git, f"{FORK}/{name}", trunk, owned)
             base = "same base" if generated.base == feat.base else f"base {generated.behind} behind"
             vs_feat, gen_commits = f"{code(generated, feat)}, {base}", str(generated.commits)
             if generated.github_files:
@@ -135,14 +150,14 @@ def report(git: Git, prs: list[dict[str, Any]], owner: str) -> str:
             if name in staged:
                 if staged[name] != generated.sha:
                     behind_tags.append(name)
-                tag = read_tip(git, f"{staged_prefix}{name}", trunk)
+                tag = read_tip(git, f"{staged_prefix}{name}", trunk, owned)
                 if tag.change != feat.change:
                     tag_differs.append(name)
 
         vs_generated = "no `-upstream`"
         if f"{name}-upstream" in shas:
             shown.add(f"{name}-upstream")
-            upstream = read_tip(git, f"{FORK}/{name}-upstream", trunk)
+            upstream = read_tip(git, f"{FORK}/{name}-upstream", trunk, owned)
             base = "base current" if not upstream.behind else f"base {upstream.behind} behind"
             against = generated or feat
             vs_generated = (f"{code(upstream, against)}, {base}, "
