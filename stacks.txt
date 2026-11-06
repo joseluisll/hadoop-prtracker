@@ -1,0 +1,20 @@
+# The stacked PRs: branch: commit range(s) in the order the PR description gives.
+#
+# A range is what the PR carries: its own commits on top of the trunk point it was
+# last built on. Replaying those commits onto current trunk keeps intra-stack
+# dependencies intact (20004, 20006 and 20007 all edit TestHttpServer, each on top of
+# the previous one's change). Squashing each prerequisite to its net change instead
+# makes them collide with each other.
+#
+# PR #8699 - review only the last commit (HADOOP-19970):
+#   1. HADOOP-20012  2. HADOOP-20014  3. HADOOP-20013  4. HADOOP-20015
+#   5. HADOOP-20016  6. HADOOP-19970 (+ its Yetus trigger commit)
+jetty-phase-a: 3bf3610bebcc..origin/jetty-phase-a
+
+# PR #8703 - 9 commits, all HADOOP-19971.
+jetty-phase-b: 3bf3610bebcc..origin/jetty-phase-b
+
+# PR #8704 - review only the last 6 commits: the phase A stack (commits 1-6),
+# HADOOP-20049 (7), HADOOP-20003/20005/20004/20006/20007/20008 and HADOOP-20007's
+# second commit (8-14), then HADOOP-19972 (15-20).
+jetty-phase-c: 3bf3610bebcc..origin/jetty-phase-c
